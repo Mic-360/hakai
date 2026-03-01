@@ -1,0 +1,466 @@
+mod config;
+mod deleter;
+mod ipc;
+pub mod platform;
+mod risk;
+mod scanner;
+mod sizer;
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+
+use clap::Parser;
+use serde::Serialize;
+
+use scanner::ScanOptions;
+
+/// 💀 hakai — blazing-fast directory destroyer (Rust + Bun)
+#[derive(Parser, Debug)]
+#[command(name = "hakai", version = "1.0.0", about = "💀 hakai — find and destroy node_modules & more")]
+struct Args {
+    /// Start scan from this directory (default: current dir)
+    #[arg(short = 'd', long = "directory")]
+    directory: Option<String>,
+
+    /// Start scan from $HOME
+    #[arg(short = 'f', long = "full")]
+    full: bool,
+
+    /// Target directory names (comma-separated)
+    #[arg(short = 't', long = "target", value_delimiter = ',')]
+    target: Option<Vec<String>>,
+
+    /// Use a named profile from .hakairc
+    #[arg(short = 'p', long = "profile")]
+    profile: Option<String>,
+
+    /// Exclude directories (comma-separated)
+    #[arg(short = 'E', long = "exclude", value_delimiter = ',')]
+    exclude: Option<Vec<String>>,
+
+    /// Exclude hidden/dot directories
+    #[arg(short = 'x', long = "exclude-hidden")]
+    exclude_hidden: bool,
+
+    /// Maximum scan depth
+    #[arg(long = "max-depth")]
+    max_depth: Option<usize>,
+
+    /// Auto-delete all found directories
+    #[arg(short = 'D', long = "delete-all")]
+    delete_all: bool,
+
+    /// Skip confirmation on --delete-all
+    #[arg(short = 'y')]
+    yes: bool,
+
+    /// Simulate deletion (no actual deletes)
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+
+    /// Sort by: path, size, last-mod
+    #[arg(short = 's', long = "sort")]
+    sort: Option<String>,
+
+    /// Output all results as JSON at end of scan
+    #[arg(long = "json")]
+    json: bool,
+
+    /// Stream results as newline-delimited JSON
+    #[arg(long = "json-stream")]
+    json_stream: bool,
+
+    /// Suppress error messages
+    #[arg(short = 'e', long = "hide-errors")]
+    hide_errors: bool,
+
+    /// Rayon thread pool size (0 = auto)
+    #[arg(long = "threads")]
+    threads: Option<usize>,
+
+    /// Disable parallel scan
+    #[arg(long = "no-parallel")]
+    no_parallel: bool,
+
+    /// Run in IPC server mode (used by hakai-tui)
+    #[arg(long = "ipc", hide = true)]
+    ipc: bool,
+
+    /// Skip update check
+    #[arg(long = "no-check-update")]
+    no_check_update: bool,
+
+    /// Highlight color
+    #[arg(short = 'c', long = "color")]
+    color: Option<String>,
+
+    /// Size unit: auto, mb, gb
+    #[arg(long = "size-unit")]
+    size_unit: Option<String>,
+}
+
+#[derive(Serialize)]
+struct JsonOutput {
+    meta: JsonMeta,
+    results: Vec<JsonResult>,
+    summary: JsonSummary,
+}
+
+#[derive(Serialize)]
+struct JsonMeta {
+    version: String,
+    scan_root: String,
+    targets: Vec<String>,
+    duration_ms: u64,
+    dirs_scanned: u64,
+}
+
+#[derive(Serialize)]
+#[allow(non_snake_case)]
+struct JsonResult {
+    path: String,
+    size: u64,
+    #[serde(rename = "modificationTime")]
+    modification_time: u64,
+    #[serde(rename = "isDead")]
+    is_dead: bool,
+    #[serde(rename = "riskLevel")]
+    risk_level: String,
+}
+
+#[derive(Serialize)]
+struct JsonSummary {
+    total_found: u64,
+    total_size_bytes: u64,
+    total_size_human: String,
+}
+
+fn main() {
+    let args = Args::parse();
+    let cfg = config::load_config();
+
+    // Configure thread pool
+    if let Some(threads) = args.threads {
+        if threads > 0 {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global()
+                .ok();
+        }
+    } else if cfg.settings.threads > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cfg.settings.threads)
+            .build_global()
+            .ok();
+    }
+
+    if args.ipc {
+        // IPC server mode — communicate with Bun TUI via stdin/stdout JSON
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(ipc::run_ipc_server(&cfg));
+        return;
+    }
+
+    // Determine targets
+    let targets = if let Some(profile_name) = &args.profile {
+        let profiles = config::builtin_profiles();
+        let all_profiles = cfg.profiles.iter().chain(profiles.iter());
+        let mut found = None;
+        for (name, profile) in all_profiles {
+            if name == profile_name {
+                found = Some(profile.targets.clone());
+                break;
+            }
+        }
+        found.unwrap_or_else(|| {
+            eprintln!("Unknown profile: {profile_name}. Available: node, rust, python, flutter, java, all");
+            std::process::exit(1);
+        })
+    } else if let Some(ref t) = args.target {
+        t.clone()
+    } else {
+        vec!["node_modules".into()]
+    };
+
+    // Determine root directory
+    let root = if args.full {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    } else if let Some(ref d) = args.directory {
+        PathBuf::from(d)
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+
+    let exclude = args.exclude.clone().unwrap_or_default();
+    let exclude_hidden = args.exclude_hidden || cfg.settings.exclude_hidden;
+
+    let scan_opts = ScanOptions {
+        root: root.clone(),
+        targets: targets.clone(),
+        exclude,
+        exclude_hidden,
+        max_depth: args.max_depth,
+    };
+
+    if args.json || args.json_stream || args.delete_all {
+        // Headless mode
+        run_headless(args, scan_opts, &targets);
+    } else {
+        // Try to spawn TUI
+        match find_tui_binary() {
+            Some(tui_path) => {
+                spawn_tui(&tui_path, &root, &targets, &args);
+            }
+            None => {
+                eprintln!("hakai-tui not found. Use --json for headless mode or install the TUI component.");
+                eprintln!("Falling back to headless JSON stream mode...\n");
+                let args_headless = Args {
+                    json_stream: true,
+                    ..args
+                };
+                run_headless(args_headless, scan_opts, &targets);
+            }
+        }
+    }
+}
+
+fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let cancel = AtomicBool::new(false);
+
+    let opts_clone = scan_opts.clone();
+    std::thread::spawn(move || {
+        scanner::scan_parallel(&opts_clone, &tx, &cancel);
+    });
+
+    let mut results: Vec<JsonResult> = Vec::new();
+    let mut total_size = 0u64;
+    let mut duration_ms = 0u64;
+
+    for event in rx {
+        match event {
+            scanner::ScanEvent::Found { path } => {
+                let size = sizer::calculate_size(&path);
+                let newest = sizer::get_newest_file_time(&path).unwrap_or(0);
+
+                let target_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                let risk_result = risk::analyze_risk(&path, target_name);
+
+                total_size += size;
+
+                let jr = JsonResult {
+                    path: path.to_string_lossy().to_string(),
+                    size,
+                    modification_time: newest,
+                    is_dead: risk_result.is_dead,
+                    risk_level: format!("{:?}", risk_result.risk_level).to_lowercase(),
+                };
+
+                if args.json_stream {
+                    if let Ok(json) = serde_json::to_string(&jr) {
+                        println!("{json}");
+                    }
+                }
+
+                results.push(jr);
+            }
+            scanner::ScanEvent::Complete {
+                total_found: _,
+                duration_ms: d,
+            } => {
+                duration_ms = d;
+                break;
+            }
+            scanner::ScanEvent::Error { message } => {
+                if !args.hide_errors {
+                    eprintln!("Error: {message}");
+                }
+            }
+            scanner::ScanEvent::Progress { .. } => {}
+        }
+    }
+
+    // Sort results
+    let sort_mode = args
+        .sort
+        .as_deref()
+        .unwrap_or(&"path");
+    match sort_mode {
+        "size" => results.sort_by(|a, b| b.size.cmp(&a.size)),
+        "last-mod" => results.sort_by(|a, b| b.modification_time.cmp(&a.modification_time)),
+        _ => results.sort_by(|a, b| a.path.cmp(&b.path)),
+    }
+
+    if args.json {
+        let total_found = results.len() as u64;
+        let output = JsonOutput {
+            meta: JsonMeta {
+                version: "1.0.0".into(),
+                scan_root: scan_opts.root.to_string_lossy().to_string(),
+                targets: targets.to_vec(),
+                duration_ms,
+                dirs_scanned: total_found,
+            },
+            results,
+            summary: JsonSummary {
+                total_found,
+                total_size_bytes: total_size,
+                total_size_human: format_human_size(total_size),
+            },
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&output) {
+            println!("{json}");
+        }
+    } else if args.delete_all {
+        if results.is_empty() {
+            eprintln!("No directories found to delete.");
+            return;
+        }
+
+        let total_display = format_human_size(total_size);
+        if !args.yes {
+            eprintln!(
+                "About to delete {} directories totalling {}. Continue? [y/N] ",
+                results.len(),
+                total_display
+            );
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            if !input.trim().eq_ignore_ascii_case("y") {
+                eprintln!("Aborted.");
+                return;
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        let paths: Vec<PathBuf> = results.iter().map(|r| PathBuf::from(&r.path)).collect();
+        let delete_results = rt.block_on(deleter::delete_batch(paths, args.dry_run, 8));
+
+        let mut total_freed = 0u64;
+        for result in &delete_results {
+            match result {
+                deleter::DeleteResult::Success { path, freed_bytes } => {
+                    total_freed += freed_bytes;
+                    eprintln!("✓ Deleted: {} ({})", path.display(), format_human_size(*freed_bytes));
+                }
+                deleter::DeleteResult::Error { path, message } => {
+                    eprintln!("✗ Error: {} — {}", path.display(), message);
+                }
+            }
+        }
+        eprintln!("\n💀 Freed: {}", format_human_size(total_freed));
+    }
+}
+
+fn format_human_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn find_tui_binary() -> Option<PathBuf> {
+    // Check next to our own executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidates = if cfg!(windows) {
+                vec![dir.join("hakai-tui.exe")]
+            } else {
+                vec![dir.join("hakai-tui")]
+            };
+            for c in candidates {
+                if c.exists() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+
+    // Check PATH
+    let name = if cfg!(windows) {
+        "hakai-tui.exe"
+    } else {
+        "hakai-tui"
+    };
+    if let Ok(path) = which::which(name) {
+        return Some(path);
+    }
+
+    // Check if bun is available and we can run the TUI source directly
+    if which::which("bun").is_ok() {
+        // Look for the TUI source relative to our binary or cwd
+        let candidates = vec![
+            PathBuf::from("packages/hakai-tui/src/index.ts"),
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|p| p.join("../packages/hakai-tui/src/index.ts")))
+                .unwrap_or_default(),
+        ];
+        for c in candidates {
+            if c.exists() {
+                return Some(c);
+            }
+        }
+    }
+
+    None
+}
+
+fn spawn_tui(tui_path: &PathBuf, root: &PathBuf, targets: &[String], args: &Args) {
+    use std::process::{Command, Stdio};
+
+    let is_ts = tui_path
+        .extension()
+        .map(|e| e == "ts")
+        .unwrap_or(false);
+
+    let mut cmd = if is_ts {
+        let mut c = Command::new("bun");
+        c.arg("run").arg(tui_path);
+        c
+    } else {
+        Command::new(tui_path)
+    };
+
+    // Pass the current exe path so TUI can spawn us in IPC mode
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("HAKAI_CORE_BIN", exe);
+    }
+    cmd.env("HAKAI_ROOT", root);
+    cmd.env("HAKAI_TARGETS", targets.join(","));
+
+    if args.exclude_hidden {
+        cmd.env("HAKAI_EXCLUDE_HIDDEN", "1");
+    }
+    if args.dry_run {
+        cmd.env("HAKAI_DRY_RUN", "1");
+    }
+    if let Some(ref sort) = args.sort {
+        cmd.env("HAKAI_SORT", sort);
+    }
+    if let Some(ref color) = args.color {
+        cmd.env("HAKAI_COLOR", color);
+    }
+
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => {
+            std::process::exit(status.code().unwrap_or(0));
+        }
+        Err(e) => {
+            eprintln!("Failed to start TUI: {e}");
+            std::process::exit(1);
+        }
+    }
+}
