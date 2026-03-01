@@ -244,17 +244,17 @@ See [.hakairc.example](.hakairc.example) for a full example.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        hakai CLI                             │
-│  ┌────────────────────────┐  ┌────────────────────────────┐ │
-│  │   Rust Core             │  │   Bun TUI                  │ │
-│  │  • Parallel scan (rayon)│  │  • Interactive UI           │ │
-│  │  • Async delete (tokio) │  │  • Keyboard handling        │ │
-│  │  • Size calculation     │  │  • Diff-based rendering     │ │
-│  │  • Risk analysis        │  │  • Filtering / sorting      │ │
-│  │  • Windows path support │  │  • JSON output              │ │
-│  └───────────┬─────────────┘  └──────────┬─────────────────┘ │
-│              │  IPC (stdin/stdout JSON)   │                   │
-│              └───────────────────────────-┘                   │
+│                        hakai CLI                            │
+│  ┌─────────────────────────┐  ┌───────────────────────────┐ │
+│  │   Rust Core             │  │   Bun TUI                 │ │
+│  │  • Parallel scan (rayon)│  │  • Interactive UI         │ │
+│  │  • Async delete (tokio) │  │  • Keyboard handling      │ │
+│  │  • Size calculation     │  │  • Diff-based rendering   │ │
+│  │  • Risk analysis        │  │  • Filtering / sorting    │ │
+│  │  • Windows path support │  │  • JSON output            │ │
+│  └───────────┬─────────────┘  └──────────┬────────────────┘ │
+│              │  IPC (stdin/stdout JSON)  │                  │
+│              └───────────────────────────┘  ****                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
