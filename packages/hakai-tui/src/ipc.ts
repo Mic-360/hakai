@@ -80,6 +80,7 @@ export interface GetSizeCmd {
 export interface DeleteCmd {
 	cmd: "Delete";
 	paths: string[];
+	sizes?: Record<string, number>;
 	dry_run: boolean;
 }
 

@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rayon::prelude::*;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
@@ -32,9 +31,74 @@ fn fast_path(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-/// Fast parallel directory removal. Walks once (collecting files + computing
-/// size), deletes files in parallel, then removes directories bottom-up.
-/// Returns the total bytes freed.
+/// Delete a single file, handling read-only on Windows.
+#[inline]
+fn delete_file(path: &Path) {
+    if std::fs::remove_file(path).is_err() {
+        #[cfg(windows)]
+        {
+            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(path, perms);
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+}
+
+/// Parallel recursive walk-and-delete using rayon work-stealing.
+fn parallel_delete_recursive(dir: &Path, freed: &AtomicU64) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if ft.is_dir() {
+            subdirs.push(path);
+        } else {
+            if let Ok(meta) = entry.metadata() {
+                freed.fetch_add(meta.len(), Ordering::Relaxed);
+            }
+            files.push(path);
+        }
+    }
+
+    rayon::scope(|s| {
+        for subdir in &subdirs {
+            s.spawn(move |_| {
+                parallel_delete_recursive(subdir, freed);
+                let _ = std::fs::remove_dir(subdir);
+            });
+        }
+
+        if files.len() > 256 {
+            use rayon::prelude::*;
+            files.par_iter().for_each(|f| delete_file(f));
+        } else {
+            for f in &files {
+                delete_file(f);
+            }
+        }
+    });
+}
+
+/// Full parallel directory removal. Returns total bytes freed.
 fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
     if !path.exists() {
         return Err(std::io::Error::new(
@@ -43,82 +107,83 @@ fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
         ));
     }
 
-    // Use \\?\ prefix for the root to enable long-path support and faster I/O
     let root = fast_path(path);
+    let freed = AtomicU64::new(0);
 
-    let mut files: Vec<PathBuf> = Vec::with_capacity(16384);
-    let mut dirs: Vec<(PathBuf, usize)> = Vec::with_capacity(2048); // (path, depth)
-    let total_bytes = AtomicU64::new(0);
+    parallel_delete_recursive(&root, &freed);
 
-    // Single walk: collect files + dirs, sum file sizes
-    for entry in walkdir::WalkDir::new(&root)
-        .follow_links(false)
-        .contents_first(false)
-    {
-        match entry {
-            Ok(e) => {
-                if e.file_type().is_dir() {
-                    dirs.push((e.path().to_owned(), e.depth()));
-                } else {
-                    // Accumulate size from the DirEntry metadata (already cached by walkdir)
-                    if let Ok(meta) = e.metadata() {
-                        total_bytes.fetch_add(meta.len(), Ordering::Relaxed);
-                    }
-                    files.push(e.path().to_owned());
-                }
-            }
-            Err(_) => {
-                // Continue past errors (permission denied, etc.)
-            }
+    let size = freed.load(Ordering::Relaxed);
+
+    if let Err(_) = std::fs::remove_dir(&root) {
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
         }
-    }
-
-    let size = total_bytes.load(Ordering::Relaxed);
-
-    // Delete all files in parallel using rayon
-    files.par_iter().for_each(|f| {
-        if std::fs::remove_file(f).is_err() {
-            // On Windows, try clearing read-only and retry
-            #[cfg(windows)]
-            {
-                if let Ok(meta) = std::fs::metadata(f) {
-                    let mut perms = meta.permissions();
-                    if perms.readonly() {
-                        perms.set_readonly(false);
-                        let _ = std::fs::set_permissions(f, perms);
-                        let _ = std::fs::remove_file(f);
-                    }
-                }
-            }
-        }
-    });
-
-    // Remove directories bottom-up (deepest first) — sort by depth descending
-    dirs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-
-    // Parallel dir removal in depth layers
-    let mut i = 0;
-    while i < dirs.len() {
-        let current_depth = dirs[i].1;
-        let start = i;
-        while i < dirs.len() && dirs[i].1 == current_depth {
-            i += 1;
-        }
-        // Remove all dirs at this depth level in parallel
-        dirs[start..i].par_iter().for_each(|(dir, _)| {
-            let _ = std::fs::remove_dir(dir);
-        });
-    }
-
-    // Final cleanup: if root still exists (e.g. files were locked), try once more
-    if root.exists() {
-        std::fs::remove_dir_all(&root)?;
     }
 
     Ok(size)
 }
 
-/// Delete a single directory. If `dry_run`, simulate without actually removing.
+/// Generate a unique trash directory name next to the target.
+fn trash_path_for(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // Use a dot-prefix so scanners with exclude_hidden skip it
+    Some(parent.join(format!(".hakai_trash_{ts:x}")))
+}
+
+/// Deletion via rename trick: renames the directory to a trash name (instant
+/// on same filesystem) so the original path disappears immediately, then
+/// deletes the renamed directory's contents in parallel before returning.
+///
+/// `known_size` is the pre-calculated size from the scan phase so we don't
+/// need to re-walk the directory for byte counting.
+pub async fn delete_dir_instant(path: PathBuf, known_size: u64, dry_run: bool) -> DeleteResult {
+    if dry_run {
+        return DeleteResult::Success {
+            path,
+            freed_bytes: known_size,
+        };
+    }
+
+    // Try the rename trick first — rename is instant on the same filesystem,
+    // then delete the renamed directory (the original path disappears immediately).
+    if let Some(trash) = trash_path_for(&path) {
+        if std::fs::rename(&path, &trash).is_ok() {
+            // Delete the renamed directory on a blocking thread and wait for completion
+            let result = tokio::task::spawn_blocking(move || {
+                let freed = AtomicU64::new(0);
+                let root = fast_path(&trash);
+                parallel_delete_recursive(&root, &freed);
+                let _ = std::fs::remove_dir(&root);
+                if root.exists() {
+                    let _ = std::fs::remove_dir_all(&root);
+                }
+            })
+            .await;
+
+            return match result {
+                Ok(()) => DeleteResult::Success {
+                    path,
+                    freed_bytes: known_size,
+                },
+                Err(e) => DeleteResult::Error {
+                    path,
+                    message: format!("Delete task failed: {e}"),
+                },
+            };
+        }
+        // rename failed (cross-device, permission, etc.) — fall through to direct delete
+    }
+
+    // Fallback: direct deletion (blocking)
+    delete_dir(path, dry_run).await
+}
+
+/// Delete a single directory directly (blocking). Used as fallback and for
+/// headless CLI mode.
 pub async fn delete_dir(path: PathBuf, dry_run: bool) -> DeleteResult {
     if dry_run {
         let size = crate::sizer::calculate_size(&path);
@@ -128,8 +193,6 @@ pub async fn delete_dir(path: PathBuf, dry_run: bool) -> DeleteResult {
         };
     }
 
-    // Perform fast parallel deletion on a blocking thread — size is computed
-    // during the walk so we don't need a separate `calculate_size` call.
     let p = path.clone();
     let result = tokio::task::spawn_blocking(move || fast_remove_dir_all(&p)).await;
 

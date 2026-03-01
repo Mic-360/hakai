@@ -368,6 +368,7 @@ export class App {
 				this.ipc.send({
 					cmd: "Delete",
 					paths: [result.path],
+					sizes: { [result.path]: result.sizeBytes },
 					dry_run: this.dryRun,
 				});
 			}
@@ -392,9 +393,15 @@ export class App {
 				if (r) r.status = "deleting";
 			}
 			this.state.mode = "deleting";
+			const sizes: Record<string, number> = {};
+			for (const p of paths) {
+				const r = this.state.results.find((r) => r.path === p);
+				if (r) sizes[p] = r.sizeBytes;
+			}
 			this.ipc.send({
 				cmd: "Delete",
 				paths,
+				sizes,
 				dry_run: this.dryRun,
 			});
 			this.state.selectedPaths.clear();

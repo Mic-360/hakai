@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29,6 +30,8 @@ pub enum IpcCommand {
     },
     Delete {
         paths: Vec<String>,
+        #[serde(default)]
+        sizes: HashMap<String, u64>,
         dry_run: bool,
     },
     DeleteAll {
@@ -108,6 +111,7 @@ pub async fn run_ipc_server(_config: &HakaiConfig) {
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let mut found_paths: Vec<PathBuf> = Vec::new();
+    let known_sizes: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
 
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim().to_string();
@@ -117,7 +121,7 @@ pub async fn run_ipc_server(_config: &HakaiConfig) {
 
         match serde_json::from_str::<IpcCommand>(&line) {
             Ok(cmd) => {
-                handle_command(cmd, &cancel_flag, &mut found_paths).await;
+                handle_command(cmd, &cancel_flag, &mut found_paths, &known_sizes).await;
             }
             Err(e) => {
                 emit(&IpcEvent::Error {
@@ -133,6 +137,7 @@ async fn handle_command(
     cmd: IpcCommand,
     cancel_flag: &Arc<AtomicBool>,
     found_paths: &mut Vec<PathBuf>,
+    known_sizes: &Arc<Mutex<HashMap<String, u64>>>,
 ) {
     match cmd {
         IpcCommand::StartScan {
@@ -144,6 +149,7 @@ async fn handle_command(
         } => {
             cancel_flag.store(false, Ordering::Relaxed);
             found_paths.clear();
+            known_sizes.lock().unwrap().clear();
 
             let opts = ScanOptions {
                 root: PathBuf::from(&root),
@@ -170,13 +176,16 @@ async fn handle_command(
                         found_paths.push(path.clone());
                         emit(&IpcEvent::ScanFound { path: path_str }).await;
 
-                        // Concurrently calculate size
+                        // Concurrently calculate size and track it
                         let p = path.clone();
+                        let sizes = known_sizes.clone();
                         tokio::task::spawn_blocking(move || {
                             let size = sizer::calculate_size(&p);
                             let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+                            let path_str = p.to_string_lossy().to_string();
+                            sizes.lock().unwrap().insert(path_str.clone(), size);
                             emit_sync(&IpcEvent::ScanSize {
-                                path: p.to_string_lossy().to_string(),
+                                path: path_str,
                                 size_bytes: size,
                                 newest_ms: newest,
                             });
@@ -237,7 +246,7 @@ async fn handle_command(
             .await;
         }
 
-        IpcCommand::Delete { paths, dry_run } => {
+        IpcCommand::Delete { paths, sizes, dry_run } => {
             let mut total_freed = 0u64;
             for path_str in &paths {
                 let path = PathBuf::from(path_str);
@@ -248,7 +257,19 @@ async fn handle_command(
                 })
                 .await;
 
-                let result = deleter::delete_dir(path, dry_run).await;
+                // Use size from the Delete command, fall back to known_sizes from scan
+                let size_hint = sizes.get(path_str).copied()
+                    .or_else(|| known_sizes.lock().unwrap().get(path_str).copied())
+                    .unwrap_or(0);
+
+                let result = if size_hint > 0 {
+                    // Use instant rename-based deletion with pre-known size
+                    deleter::delete_dir_instant(path, size_hint, dry_run).await
+                } else {
+                    // Fallback: direct deletion (computes size during delete)
+                    deleter::delete_dir(path, dry_run).await
+                };
+
                 match &result {
                     deleter::DeleteResult::Success { path, freed_bytes } => {
                         total_freed += freed_bytes;
@@ -273,12 +294,25 @@ async fn handle_command(
         }
 
         IpcCommand::DeleteAll { dry_run } => {
-            let paths: Vec<PathBuf> = found_paths.iter().cloned().collect();
-            let results = deleter::delete_batch(paths, dry_run, 8).await;
-
             let mut total_freed = 0u64;
-            for result in &results {
-                match result {
+            let sizes_map = known_sizes.lock().unwrap().clone();
+            for path in found_paths.iter() {
+                let path_str = path.to_string_lossy().to_string();
+                emit(&IpcEvent::DeleteProgress {
+                    path: path_str.clone(),
+                    status: "deleting".into(),
+                    freed_bytes: 0,
+                })
+                .await;
+
+                let size_hint = sizes_map.get(&path_str).copied().unwrap_or(0);
+                let result = if size_hint > 0 {
+                    deleter::delete_dir_instant(path.clone(), size_hint, dry_run).await
+                } else {
+                    deleter::delete_dir(path.clone(), dry_run).await
+                };
+
+                match &result {
                     deleter::DeleteResult::Success { path, freed_bytes } => {
                         total_freed += freed_bytes;
                         emit(&IpcEvent::DeleteProgress {
