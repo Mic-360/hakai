@@ -1,0 +1,15 @@
+{
+	"name": "hakai",
+	"version": "1.0.0",
+	"description": "💀 hakai — blazing-fast directory destroyer (Rust + Bun)",
+	"private": true,
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build": "make build",
+		"build:rust": "make build-rust",
+		"build:bun": "make build-bun",
+		"test": "make test"
+	}
+}

@@ -1,0 +1,6 @@
+/target
+/dist
+/node_modules
+*.exe
+*.pdb
+bun.lockb
