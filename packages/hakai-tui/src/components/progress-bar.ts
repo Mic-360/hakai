@@ -9,7 +9,7 @@ export function renderProgressBar(state: AppState, width: number): string[] {
 		const barWidth = Math.min(width - 30, 40);
 		const bar = `${FG_GREEN}${"█".repeat(barWidth)}${RESET}`;
 		return [
-			`  [${bar}]  ${FG_GREEN}${BOLD}Done${RESET}  ${DIM}${state.dirsScanned.toLocaleString()} dirs scanned${RESET}`,
+			`  [${bar}]  ${FG_GREEN}${BOLD}Exorcised${RESET}  ${DIM}${state.dirsScanned.toLocaleString()} dirs seen by Six Eyes${RESET}`,
 			"",
 		];
 	}

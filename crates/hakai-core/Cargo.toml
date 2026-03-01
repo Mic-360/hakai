@@ -2,7 +2,7 @@
 name = "hakai-core"
 version = "1.0.0"
 edition = "2021"
-description = "Blazing-fast filesystem engine for hakai — find and destroy node_modules & more"
+description = "The strongest filesystem engine for hakai — \"Throughout the filesystem, I alone am the honored one.\""
 
 [[bin]]
 name = "hakai"

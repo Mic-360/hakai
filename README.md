@@ -1,12 +1,11 @@
 <div align="center">
-  <img src="hakai-logo.png" alt="hakai logo" width="100%" />
+  <img src="hakai-logo.png" align="center" alt="hakai logo" width="30%" />
 
+# 🦀 hakai (破壊)
 
-# 💀 hakai (破壊)
+**"Throughout the filesystem and the disk, I alone am the honored one."**
 
-**Blazing-fast directory destroyer — find and obliterate `node_modules`, `target`, `__pycache__`, and more.**
-
-A high-performance rewrite of [npkill](https://github.com/voidcosmos/npkill), built with **Rust** for the filesystem engine and **Bun** for the interactive TUI.
+**The strongest directory destroyer — find and obliterate `node_modules`, `target`, `__pycache__`, and more with Gojo Satoru's confidence.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
@@ -19,7 +18,7 @@ A high-performance rewrite of [npkill](https://github.com/voidcosmos/npkill), bu
 
 ## Why hakai?
 
-**npkill** is great, but it has known limits: slow scans on large trees, single-threaded deletion, broken TTY on Windows Git Bash, and performance issues from high-level directories. **hakai eliminates all of these.**
+**npkill is weak.** It has known limits: slow scans on large trees, single-threaded deletion, broken TTY on Windows Git Bash, and performance issues from high-level directories. **Hakai eliminates all of these with effortless superiority.**
 
 | Operation                | npkill (Node.js) | hakai (Rust+Bun)    | Gain       |
 | ------------------------ | ---------------- | ------------------- | ---------- |
@@ -29,6 +28,19 @@ A high-performance rewrite of [npkill](https://github.com/voidcosmos/npkill), bu
 | Delete-all (100 folders) | Sequential       | 8 concurrent        | **20–40×** |
 | Startup                  | ~400ms           | <50ms               | **8×**     |
 | Windows Git Bash         | ❌ Broken        | ✅ Works            | Fixed      |
+
+## Meet Hakai 🦀
+
+<img src="hakai-logo.png" align="right" width="150" />
+
+Hakai isn't just a Rust crab; he's the **strongest** guardian of your storage. Impersonating the legendary Gojo Satoru, he approaches directory cleanup with overwhelming power and a touch of arrogance—but only because he's actually that good.
+
+- **Storage Obsessed**: He hates wasted space more than he hates low-level curses.
+- **Time Warden**: "Speed is the essence of my technique." He won't let you wait for scans.
+- **Six Eyes (FS Edition)**: He sees every `node_modules` and `target` folder instantly, no matter how deep they hide.
+- **Hollow Purple Deletion**: When he deletes a folder, it doesn't just go to the bin; it's erased from existence.
+
+> *"Don't worry, I'm the strongest. Your storage is safe with me."* — Hakai 🦀
 
 ## Demo
 

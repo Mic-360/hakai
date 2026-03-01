@@ -23,10 +23,10 @@ export function renderResultsList(state: AppState, width: number, height: number
 	if (results.length === 0) {
 		if (state.scanComplete) {
 			lines.push("");
-			lines.push(`  ${DIM}No directories found.${RESET}`);
+			lines.push(`  ${DIM}No directories found. My Six Eyes see everything, and there are no curses here.${RESET}`);
 		} else {
 			lines.push("");
-			lines.push(`  ${DIM}Scanning...${RESET}`);
+			lines.push(`  ${DIM}Scanning... Domain Expansion: Infinite Scan!${RESET}`);
 		}
 		while (lines.length < height) {
 			lines.push("");

@@ -14,9 +14,9 @@ use serde::Serialize;
 
 use scanner::ScanOptions;
 
-/// 💀 hakai — blazing-fast directory destroyer (Rust + Bun)
+/// 🦀 hakai — The strongest directory destroyer (Rust + Bun)
 #[derive(Parser, Debug)]
-#[command(name = "hakai", version = "1.0.0", about = "💀 hakai — find and destroy node_modules & more")]
+#[command(name = "hakai", version = "1.0.0", about = "🦀 Hakai — \"Throughout the filesystem, I alone am the honored one.\"")]
 struct Args {
     /// Start scan from this directory (default: current dir)
     #[arg(short = 'd', long = "directory")]
@@ -323,14 +323,14 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
         let total_display = format_human_size(total_size);
         if !args.yes {
             eprintln!(
-                "About to delete {} directories totalling {}. Continue? [y/N] ",
+                "🔵 Red, 🔴 Blue... 🟣 Hollow Purple! Prepare to delete {} directories ({}). Continue? [y/N] ",
                 results.len(),
                 total_display
             );
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).ok();
             if !input.trim().eq_ignore_ascii_case("y") {
-                eprintln!("Aborted.");
+                eprintln!("Tch. Changed your mind? Aborted.");
                 return;
             }
         }
@@ -354,7 +354,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
                 }
             }
         }
-        eprintln!("\n💀 Freed: {}", format_human_size(total_freed));
+        eprintln!("\n🦀 Freed: {}. Domain Expansion: Infinite Free Space!", format_human_size(total_freed));
     }
 }
 

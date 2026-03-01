@@ -7,6 +7,7 @@ import { renderStatusBar } from "./components/status-bar";
 import type { KeyAction } from "./constants/keybinds";
 import { InputHandler } from "./input";
 import { IpcClient, type IpcEvent } from "./ipc";
+import { APP_SUBTITLE, APP_TITLE, HAKAI_QUOTES, VERSION } from "./constants/cli";
 import { DiffRenderer } from "./renderer";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -49,6 +50,10 @@ export interface AppState {
 	scanDurationMs: number;
 	dirsScanned: number;
 	dirsPending: number;
+	currentQuote: string;
+	title: string;
+	subtitle: string;
+	version: string;
 }
 
 // ── App ──────────────────────────────────────────────────────────
@@ -93,6 +98,10 @@ export class App {
 			scanDurationMs: 0,
 			dirsScanned: 0,
 			dirsPending: 0,
+			currentQuote: HAKAI_QUOTES[Math.floor(Math.random() * HAKAI_QUOTES.length)],
+			title: APP_TITLE,
+			subtitle: APP_SUBTITLE,
+			version: VERSION,
 		};
 
 		this.renderer = new DiffRenderer();
