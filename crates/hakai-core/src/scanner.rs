@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::{collections::HashSet, path::Component};
 
 use crossbeam_channel::Sender;
 use rayon::prelude::*;
@@ -43,6 +44,7 @@ pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &Atomic
     let start = std::time::Instant::now();
     let dirs_scanned = Arc::new(AtomicU64::new(0));
     let dirs_found = Arc::new(AtomicU64::new(0));
+    let matcher = ScanMatcher::new(opts);
 
     // Collect top-level children of root for parallel dispatch
     let top_level: Vec<PathBuf> = match std::fs::read_dir(&opts.root) {
@@ -50,7 +52,7 @@ pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &Atomic
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
             .map(|e| e.path())
-            .filter(|p| should_visit_path(p, opts))
+            .filter(|p| should_visit_path(p, &matcher))
             .collect(),
         Err(e) => {
             let _ = tx.send(ScanEvent::Error {
@@ -66,7 +68,7 @@ pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &Atomic
 
     // Also check if root itself is a target
     if let Some(name) = opts.root.file_name().and_then(|n| n.to_str()) {
-        if opts.targets.iter().any(|t| t == name) {
+        if matcher.is_target(name) {
             dirs_found.fetch_add(1, Ordering::Relaxed);
             let _ = tx.send(ScanEvent::Found {
                 path: opts.root.clone(),
@@ -79,7 +81,7 @@ pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &Atomic
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        scan_subtree(dir, opts, tx, cancel, &dirs_scanned, &dirs_found);
+        scan_subtree(dir, &matcher, tx, cancel, &dirs_scanned, &dirs_found);
     });
 
     let total = dirs_found.load(Ordering::Relaxed);
@@ -91,7 +93,7 @@ pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &Atomic
 
 fn scan_subtree(
     root: &Path,
-    opts: &ScanOptions,
+    matcher: &ScanMatcher,
     tx: &Sender<ScanEvent>,
     cancel: &AtomicBool,
     dirs_scanned: &AtomicU64,
@@ -99,7 +101,7 @@ fn scan_subtree(
 ) {
     // Check if this top-level dir itself is a target
     if let Some(name) = root.file_name().and_then(|n| n.to_str()) {
-        if opts.targets.iter().any(|t| t == name) {
+        if matcher.is_target(name) {
             dirs_found.fetch_add(1, Ordering::Relaxed);
             let _ = tx.send(ScanEvent::Found {
                 path: root.to_owned(),
@@ -110,12 +112,12 @@ fn scan_subtree(
     }
 
     let mut walker = WalkDir::new(root).follow_links(false).min_depth(1);
-    if let Some(depth) = opts.max_depth {
+    if let Some(depth) = matcher.max_depth {
         walker = walker.max_depth(depth);
     }
 
-    let iter = walker.into_iter();
-    for entry in iter {
+    let mut iter = walker.into_iter();
+    while let Some(entry) = iter.next() {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -126,18 +128,19 @@ fn scan_subtree(
                     continue;
                 }
 
-                let scanned = dirs_scanned.fetch_add(1, Ordering::Relaxed);
-                // Emit progress periodically
-                if scanned % 500 == 0 {
-                    let _ = tx.send(ScanEvent::Progress {
-                        dirs_scanned: scanned,
-                        dirs_found: dirs_found.load(Ordering::Relaxed),
-                    });
+                let path = e.path();
+                if !should_visit_path(path, matcher) {
+                    iter.skip_current_dir();
+                    continue;
                 }
 
-                let path = e.path();
-                if !should_visit_path(path, opts) {
-                    continue;
+                let scanned_now = dirs_scanned.fetch_add(1, Ordering::Relaxed) + 1;
+                // Emit progress periodically
+                if scanned_now % 500 == 0 {
+                    let _ = tx.send(ScanEvent::Progress {
+                        dirs_scanned: scanned_now,
+                        dirs_found: dirs_found.load(Ordering::Relaxed),
+                    });
                 }
 
                 let name = match e.file_name().to_str() {
@@ -145,15 +148,13 @@ fn scan_subtree(
                     None => continue,
                 };
 
-                if opts.targets.iter().any(|t| t == name) {
+                if matcher.is_target(name) {
                     dirs_found.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.send(ScanEvent::Found {
                         path: path.to_owned(),
                     });
-                    // Note: WalkDir doesn't have skip_current_dir in this iteration
-                    // model but since we skip anything under a target dir in
-                    // should_visit_path via the exclude/target containment check,
-                    // nested targets won't cause issues.
+                    // Found target dir: prune subtree to avoid needless traversal.
+                    iter.skip_current_dir();
                 }
             }
             Err(e) => {
@@ -165,46 +166,84 @@ fn scan_subtree(
     }
 }
 
+struct ScanMatcher<'a> {
+    targets: HashSet<&'a str>,
+    exclude: HashSet<&'a str>,
+    exclude_hidden: bool,
+    max_depth: Option<usize>,
+}
+
+impl<'a> ScanMatcher<'a> {
+    fn new(opts: &'a ScanOptions) -> Self {
+        Self {
+            targets: opts.targets.iter().map(String::as_str).collect(),
+            exclude: opts.exclude.iter().map(String::as_str).collect(),
+            exclude_hidden: opts.exclude_hidden,
+            max_depth: opts.max_depth,
+        }
+    }
+
+    #[inline]
+    fn is_target(&self, name: &str) -> bool {
+        self.targets.contains(name)
+    }
+}
+
 /// Determines whether a directory path should be visited during scanning.
-fn should_visit_path(path: &Path, opts: &ScanOptions) -> bool {
+fn should_visit_path(path: &Path, matcher: &ScanMatcher) -> bool {
     let name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,
         None => return true,
     };
 
     // Skip hidden directories if configured
-    if opts.exclude_hidden && name.starts_with('.') {
+    if matcher.exclude_hidden && name.starts_with('.') {
         return false;
     }
 
     // Skip excluded directories
-    if opts.exclude.iter().any(|ex| ex == name) {
+    if matcher.exclude.contains(name) {
         return false;
-    }
-
-    // Don't recurse into directories that are themselves inside a target match.
-    // This handles the pruning: once we find node_modules, don't scan inside it.
-    for ancestor in path.ancestors().skip(1) {
-        if let Some(aname) = ancestor.file_name().and_then(|n| n.to_str()) {
-            if opts.targets.iter().any(|t| t == aname) {
-                return false;
-            }
-        }
     }
 
     // Skip known system paths
     #[cfg(windows)]
     {
-        let s = path.to_string_lossy().to_lowercase();
-        if s.starts_with("c:\\windows")
-            || s.starts_with("c:\\program files")
-            || s.starts_with("c:\\program files (x86)")
-        {
+        if is_windows_system_path(path) {
             return false;
         }
     }
 
     true
+}
+
+#[cfg(windows)]
+#[inline]
+fn is_windows_system_path(path: &Path) -> bool {
+    use std::path::Prefix;
+
+    let mut comps = path.components();
+    let on_c_drive = matches!(
+        comps.next(),
+        Some(Component::Prefix(prefix_comp))
+            if matches!(prefix_comp.kind(), Prefix::Disk(drive) if drive.eq_ignore_ascii_case(&b'c'))
+    );
+
+    if !on_c_drive {
+        return false;
+    }
+
+    // Skip root component and inspect the first normal segment.
+    if matches!(comps.next(), Some(Component::RootDir)) {
+        if let Some(Component::Normal(seg)) = comps.next() {
+            let s = seg.to_string_lossy();
+            return s.eq_ignore_ascii_case("windows")
+                || s.eq_ignore_ascii_case("program files")
+                || s.eq_ignore_ascii_case("program files (x86)");
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

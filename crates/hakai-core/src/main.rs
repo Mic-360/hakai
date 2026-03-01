@@ -336,8 +336,11 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
         }
 
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        let paths: Vec<PathBuf> = results.iter().map(|r| PathBuf::from(&r.path)).collect();
-        let delete_results = rt.block_on(deleter::delete_batch(paths, args.dry_run, 8));
+        let items: Vec<(PathBuf, u64)> = results
+            .iter()
+            .map(|r| (PathBuf::from(&r.path), r.size))
+            .collect();
+        let delete_results = rt.block_on(deleter::delete_batch_with_sizes(items, args.dry_run, 8));
 
         let mut total_freed = 0u64;
         for result in &delete_results {

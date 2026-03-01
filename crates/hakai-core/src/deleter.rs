@@ -50,7 +50,7 @@ fn delete_file(path: &Path) {
 }
 
 /// Parallel recursive walk-and-delete using rayon work-stealing.
-fn parallel_delete_recursive(dir: &Path, freed: &AtomicU64) {
+fn parallel_delete_recursive(dir: &Path, freed: Option<&AtomicU64>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -72,8 +72,10 @@ fn parallel_delete_recursive(dir: &Path, freed: &AtomicU64) {
         if ft.is_dir() {
             subdirs.push(path);
         } else {
-            if let Ok(meta) = entry.metadata() {
-                freed.fetch_add(meta.len(), Ordering::Relaxed);
+            if let Some(counter) = freed {
+                if let Ok(meta) = entry.metadata() {
+                    counter.fetch_add(meta.len(), Ordering::Relaxed);
+                }
             }
             files.push(path);
         }
@@ -110,7 +112,7 @@ fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
     let root = fast_path(path);
     let freed = AtomicU64::new(0);
 
-    parallel_delete_recursive(&root, &freed);
+    parallel_delete_recursive(&root, Some(&freed));
 
     let size = freed.load(Ordering::Relaxed);
 
@@ -121,6 +123,28 @@ fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
     }
 
     Ok(size)
+}
+
+/// Full parallel directory removal without byte counting.
+fn fast_remove_dir_all_no_count(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} does not exist", path.display()),
+        ));
+    }
+
+    let root = fast_path(path);
+
+    parallel_delete_recursive(&root, None);
+
+    if let Err(_) = std::fs::remove_dir(&root) {
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Generate a unique trash directory name next to the target.
@@ -153,21 +177,17 @@ pub async fn delete_dir_instant(path: PathBuf, known_size: u64, dry_run: bool) -
     if let Some(trash) = trash_path_for(&path) {
         if std::fs::rename(&path, &trash).is_ok() {
             // Delete the renamed directory on a blocking thread and wait for completion
-            let result = tokio::task::spawn_blocking(move || {
-                let freed = AtomicU64::new(0);
-                let root = fast_path(&trash);
-                parallel_delete_recursive(&root, &freed);
-                let _ = std::fs::remove_dir(&root);
-                if root.exists() {
-                    let _ = std::fs::remove_dir_all(&root);
-                }
-            })
+            let result = tokio::task::spawn_blocking(move || fast_remove_dir_all_no_count(&trash))
             .await;
 
             return match result {
-                Ok(()) => DeleteResult::Success {
+                Ok(Ok(())) => DeleteResult::Success {
                     path,
                     freed_bytes: known_size,
+                },
+                Ok(Err(e)) => DeleteResult::Error {
+                    path,
+                    message: e.to_string(),
                 },
                 Err(e) => DeleteResult::Error {
                     path,
@@ -210,19 +230,34 @@ pub async fn delete_dir(path: PathBuf, dry_run: bool) -> DeleteResult {
 }
 
 /// Delete multiple directories concurrently (up to `concurrency` at once).
-pub async fn delete_batch(
-    paths: Vec<PathBuf>,
+// pub async fn delete_batch(
+//     paths: Vec<PathBuf>,
+//     dry_run: bool,
+//     concurrency: usize,
+// ) -> Vec<DeleteResult> {
+//     let items: Vec<(PathBuf, u64)> = paths.into_iter().map(|p| (p, 0)).collect();
+//     delete_batch_with_sizes(items, dry_run, concurrency).await
+// }
+
+/// Delete multiple directories concurrently (up to `concurrency` at once),
+/// using known sizes when available to select the instant rename-based path.
+pub async fn delete_batch_with_sizes(
+    items: Vec<(PathBuf, u64)>,
     dry_run: bool,
     concurrency: usize,
 ) -> Vec<DeleteResult> {
     let semaphore = Arc::new(Semaphore::new(concurrency));
-    let mut handles = Vec::with_capacity(paths.len());
+    let mut handles = Vec::with_capacity(items.len());
 
-    for path in paths {
+    for (path, known_size) in items {
         let sem = semaphore.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            delete_dir(path, dry_run).await
+            if known_size > 0 {
+                delete_dir_instant(path, known_size, dry_run).await
+            } else {
+                delete_dir(path, dry_run).await
+            }
         }));
     }
 
