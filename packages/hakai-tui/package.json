@@ -1,0 +1,15 @@
+{
+	"name": "hakai-tui",
+	"version": "1.0.0",
+	"description": "Interactive TUI for hakai — find and destroy node_modules & more",
+	"type": "module",
+	"main": "src/index.ts",
+	"scripts": {
+		"start": "bun run src/index.ts",
+		"build": "bun build --compile --target=bun src/index.ts --outfile=../../dist/hakai-tui"
+	},
+	"dependencies": {},
+	"devDependencies": {
+		"@types/bun": "latest"
+	}
+}
