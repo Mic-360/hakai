@@ -1,5 +1,7 @@
 <div align="center">
   <img src="hakai-logo.png" alt="hakai logo" width="100%" />
+
+
 # 💀 hakai (破壊)
 
 **Blazing-fast directory destroyer — find and obliterate `node_modules`, `target`, `__pycache__`, and more.**
