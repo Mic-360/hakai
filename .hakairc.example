@@ -1,0 +1,35 @@
+# ~/.hakairc — hakai configuration
+# Place this file at ~/.hakairc or ./.hakairc
+
+[settings]
+default_sort    = "size"          # path | size | last-mod
+size_unit       = "auto"          # auto | mb | gb
+color           = "cyan"          # highlight color: blue, cyan, magenta, white, red, yellow
+check_updates   = true
+threads         = 0               # 0 = auto (num_cpus)
+exclude_hidden  = true
+
+[profiles.node]
+targets = ["node_modules"]
+
+[profiles.rust]
+targets = ["target"]
+
+[profiles.python]
+targets = ["__pycache__", ".venv", "venv", ".mypy_cache", ".ruff_cache", ".pytest_cache"]
+
+[profiles.flutter]
+targets = ["build", ".dart_tool", "ios/Pods", "android/build", "android/.gradle"]
+
+[profiles.java]
+targets = ["build", ".gradle", "out", "target"]
+
+[profiles.all]
+targets = [
+    "node_modules", "target", "__pycache__", ".venv", "venv",
+    "dist", ".next", ".nuxt", ".output", ".turbo", ".svelte-kit",
+    "build", ".gradle", ".dart_tool", ".mypy_cache"
+]
+
+[exclude]
+directories = []
