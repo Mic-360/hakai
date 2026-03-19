@@ -1,12 +1,11 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::{collections::HashSet, path::Component};
 
 use crossbeam_channel::Sender;
-use rayon::prelude::*;
+use ignore::WalkState;
 use serde::Serialize;
-use walkdir::WalkDir;
 
 /// Options controlling how the scanner traverses directories.
 #[derive(Debug, Clone)]
@@ -38,50 +37,113 @@ pub enum ScanEvent {
     },
 }
 
-/// Run a parallel directory scan, sending events to `tx` as targets are found.
-/// The `cancel` flag can be set to abort scanning early.
-pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &AtomicBool) {
+/// Run a parallel directory scan using work-stealing across all directory levels.
+/// Sends events to `tx` as targets are found. The `cancel` flag aborts scanning early.
+pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: Arc<AtomicBool>) {
     let start = std::time::Instant::now();
     let dirs_scanned = Arc::new(AtomicU64::new(0));
     let dirs_found = Arc::new(AtomicU64::new(0));
-    let matcher = ScanMatcher::new(opts);
 
-    // Collect top-level children of root for parallel dispatch
-    let top_level: Vec<PathBuf> = match std::fs::read_dir(&opts.root) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-            .map(|e| e.path())
-            .filter(|p| should_visit_path(p, &matcher))
-            .collect(),
-        Err(e) => {
-            let _ = tx.send(ScanEvent::Error {
-                message: format!("Cannot read root dir: {e}"),
-            });
-            let _ = tx.send(ScanEvent::Complete {
-                total_found: 0,
-                duration_ms: start.elapsed().as_millis() as u64,
-            });
-            return;
-        }
-    };
+    let targets: Arc<HashSet<String>> = Arc::new(opts.targets.iter().cloned().collect());
+    let exclude: Arc<HashSet<String>> = Arc::new(opts.exclude.iter().cloned().collect());
 
-    // Also check if root itself is a target
+    // Check if root itself is a target
     if let Some(name) = opts.root.file_name().and_then(|n| n.to_str()) {
-        if matcher.is_target(name) {
+        if targets.contains(name) {
             dirs_found.fetch_add(1, Ordering::Relaxed);
             let _ = tx.send(ScanEvent::Found {
                 path: opts.root.clone(),
             });
+            let _ = tx.send(ScanEvent::Complete {
+                total_found: 1,
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+            return;
         }
     }
 
-    // Parallel scan each top-level subdirectory
-    top_level.par_iter().for_each(|dir| {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        scan_subtree(dir, &matcher, tx, cancel, &dirs_scanned, &dirs_found);
+    let mut builder = ignore::WalkBuilder::new(&opts.root);
+    builder
+        .hidden(opts.exclude_hidden)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .follow_links(false)
+        .threads(0); // auto-detect CPU count
+
+    if let Some(depth) = opts.max_depth {
+        builder.max_depth(Some(depth));
+    }
+
+    builder.build_parallel().run(|| {
+        let tx = tx.clone();
+        let cancel = cancel.clone();
+        let targets = targets.clone();
+        let exclude = exclude.clone();
+        let dirs_scanned = dirs_scanned.clone();
+        let dirs_found = dirs_found.clone();
+
+        Box::new(move |entry| {
+            if cancel.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = tx.send(ScanEvent::Error {
+                        message: e.to_string(),
+                    });
+                    return WalkState::Continue;
+                }
+            };
+
+            // Only process directories
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                return WalkState::Continue;
+            }
+
+            // Skip root entry (depth 0)
+            if entry.depth() == 0 {
+                return WalkState::Continue;
+            }
+
+            let name = match entry.file_name().to_str() {
+                Some(n) => n,
+                None => return WalkState::Continue,
+            };
+
+            // Skip excluded directories
+            if exclude.contains(name) {
+                return WalkState::Skip;
+            }
+
+            // Skip known system paths on Windows
+            #[cfg(windows)]
+            if is_windows_system_path(entry.path()) {
+                return WalkState::Skip;
+            }
+
+            // Progress tracking
+            let scanned = dirs_scanned.fetch_add(1, Ordering::Relaxed) + 1;
+            if scanned % 500 == 0 {
+                let _ = tx.send(ScanEvent::Progress {
+                    dirs_scanned: scanned,
+                    dirs_found: dirs_found.load(Ordering::Relaxed),
+                });
+            }
+
+            // Check if this is a target directory
+            if targets.contains(name) {
+                dirs_found.fetch_add(1, Ordering::Relaxed);
+                let _ = tx.send(ScanEvent::Found {
+                    path: entry.into_path(),
+                });
+                return WalkState::Skip; // Don't recurse into target dirs
+            }
+
+            WalkState::Continue
+        })
     });
 
     let total = dirs_found.load(Ordering::Relaxed);
@@ -91,136 +153,10 @@ pub fn scan_parallel(opts: &ScanOptions, tx: &Sender<ScanEvent>, cancel: &Atomic
     });
 }
 
-fn scan_subtree(
-    root: &Path,
-    matcher: &ScanMatcher,
-    tx: &Sender<ScanEvent>,
-    cancel: &AtomicBool,
-    dirs_scanned: &AtomicU64,
-    dirs_found: &AtomicU64,
-) {
-    // Check if this top-level dir itself is a target
-    if let Some(name) = root.file_name().and_then(|n| n.to_str()) {
-        if matcher.is_target(name) {
-            dirs_found.fetch_add(1, Ordering::Relaxed);
-            let _ = tx.send(ScanEvent::Found {
-                path: root.to_owned(),
-            });
-            // Prune — don't recurse into matched target
-            return;
-        }
-    }
-
-    let mut walker = WalkDir::new(root).follow_links(false).min_depth(1);
-    if let Some(depth) = matcher.max_depth {
-        walker = walker.max_depth(depth);
-    }
-
-    let mut iter = walker.into_iter();
-    while let Some(entry) = iter.next() {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-
-        match entry {
-            Ok(e) => {
-                if !e.file_type().is_dir() {
-                    continue;
-                }
-
-                let path = e.path();
-                if !should_visit_path(path, matcher) {
-                    iter.skip_current_dir();
-                    continue;
-                }
-
-                let scanned_now = dirs_scanned.fetch_add(1, Ordering::Relaxed) + 1;
-                // Emit progress periodically
-                if scanned_now % 500 == 0 {
-                    let _ = tx.send(ScanEvent::Progress {
-                        dirs_scanned: scanned_now,
-                        dirs_found: dirs_found.load(Ordering::Relaxed),
-                    });
-                }
-
-                let name = match e.file_name().to_str() {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                if matcher.is_target(name) {
-                    dirs_found.fetch_add(1, Ordering::Relaxed);
-                    let _ = tx.send(ScanEvent::Found {
-                        path: path.to_owned(),
-                    });
-                    // Found target dir: prune subtree to avoid needless traversal.
-                    iter.skip_current_dir();
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(ScanEvent::Error {
-                    message: e.to_string(),
-                });
-            }
-        }
-    }
-}
-
-struct ScanMatcher<'a> {
-    targets: HashSet<&'a str>,
-    exclude: HashSet<&'a str>,
-    exclude_hidden: bool,
-    max_depth: Option<usize>,
-}
-
-impl<'a> ScanMatcher<'a> {
-    fn new(opts: &'a ScanOptions) -> Self {
-        Self {
-            targets: opts.targets.iter().map(String::as_str).collect(),
-            exclude: opts.exclude.iter().map(String::as_str).collect(),
-            exclude_hidden: opts.exclude_hidden,
-            max_depth: opts.max_depth,
-        }
-    }
-
-    #[inline]
-    fn is_target(&self, name: &str) -> bool {
-        self.targets.contains(name)
-    }
-}
-
-/// Determines whether a directory path should be visited during scanning.
-fn should_visit_path(path: &Path, matcher: &ScanMatcher) -> bool {
-    let name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => n,
-        None => return true,
-    };
-
-    // Skip hidden directories if configured
-    if matcher.exclude_hidden && name.starts_with('.') {
-        return false;
-    }
-
-    // Skip excluded directories
-    if matcher.exclude.contains(name) {
-        return false;
-    }
-
-    // Skip known system paths
-    #[cfg(windows)]
-    {
-        if is_windows_system_path(path) {
-            return false;
-        }
-    }
-
-    true
-}
-
 #[cfg(windows)]
 #[inline]
 fn is_windows_system_path(path: &Path) -> bool {
-    use std::path::Prefix;
+    use std::path::{Component, Prefix};
 
     let mut comps = path.components();
     let on_c_drive = matches!(
@@ -233,7 +169,6 @@ fn is_windows_system_path(path: &Path) -> bool {
         return false;
     }
 
-    // Skip root component and inspect the first normal segment.
     if matches!(comps.next(), Some(Component::RootDir)) {
         if let Some(Component::Normal(seg)) = comps.next() {
             let s = seg.to_string_lossy();
@@ -260,7 +195,7 @@ mod tests {
         std::fs::create_dir_all(root.join("project/src")).unwrap();
 
         let (tx, rx) = crossbeam_channel::unbounded();
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
         let opts = ScanOptions {
             root: root.to_path_buf(),
             targets: vec!["node_modules".into()],
@@ -269,7 +204,7 @@ mod tests {
             max_depth: None,
         };
 
-        scan_parallel(&opts, &tx, &cancel);
+        scan_parallel(&opts, &tx, cancel);
         drop(tx);
 
         let found: Vec<_> = rx
@@ -292,7 +227,7 @@ mod tests {
         std::fs::create_dir_all(root.join("keep/node_modules")).unwrap();
 
         let (tx, rx) = crossbeam_channel::unbounded();
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
         let opts = ScanOptions {
             root: root.to_path_buf(),
             targets: vec!["node_modules".into()],
@@ -301,7 +236,7 @@ mod tests {
             max_depth: None,
         };
 
-        scan_parallel(&opts, &tx, &cancel);
+        scan_parallel(&opts, &tx, cancel);
         drop(tx);
 
         let found: Vec<_> = rx
@@ -324,7 +259,7 @@ mod tests {
         std::fs::create_dir_all(root.join("project/node_modules/pkg/node_modules")).unwrap();
 
         let (tx, rx) = crossbeam_channel::unbounded();
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
         let opts = ScanOptions {
             root: root.to_path_buf(),
             targets: vec!["node_modules".into()],
@@ -333,7 +268,7 @@ mod tests {
             max_depth: None,
         };
 
-        scan_parallel(&opts, &tx, &cancel);
+        scan_parallel(&opts, &tx, cancel);
         drop(tx);
 
         let found: Vec<_> = rx
