@@ -186,8 +186,7 @@ async fn handle_command(
                         let p = path.clone();
                         let sizes = known_sizes.clone();
                         tokio::task::spawn_blocking(move || {
-                            let size = sizer::calculate_size(&p);
-                            let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+                            let (size, newest) = sizer::calculate_size_and_mtime(&p);
                             let path_str = p.to_string_lossy().to_string();
                             sizes.lock().unwrap().insert(path_str.clone(), size);
                             emit_sync(&IpcEvent::ScanSize {
@@ -231,8 +230,7 @@ async fn handle_command(
 
         IpcCommand::GetSize { path } => {
             let p = PathBuf::from(&path);
-            let size = sizer::calculate_size(&p);
-            let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+            let (size, newest) = sizer::calculate_size_and_mtime(&p);
             emit(&IpcEvent::ScanSize {
                 path,
                 size_bytes: size,

@@ -256,8 +256,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
     for event in rx {
         match event {
             scanner::ScanEvent::Found { path } => {
-                let size = sizer::calculate_size(&path);
-                let newest = sizer::get_newest_file_time(&path).unwrap_or(0);
+                let (size, newest) = sizer::calculate_size_and_mtime(&path);
 
                 let target_name = path
                     .file_name()

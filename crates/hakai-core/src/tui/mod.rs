@@ -189,8 +189,7 @@ fn handle_event(
             let tx = event_tx.clone();
             let p = path.clone();
             rayon::spawn(move || {
-                let size = sizer::calculate_size(&p);
-                let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+                let (size, newest) = sizer::calculate_size_and_mtime(&p);
                 tx.send(AppEvent::SizeCalculated {
                     path: p,
                     size,
