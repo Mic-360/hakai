@@ -158,12 +158,6 @@ pub fn trash_path_for(path: &Path) -> Option<PathBuf> {
     Some(parent.join(format!(".hakai_trash_{ts:x}")))
 }
 
-/// Deletion via rename trick: renames the directory to a trash name (instant
-/// on same filesystem) so the original path disappears immediately, then
-/// deletes the renamed directory's contents in parallel before returning.
-///
-/// `known_size` is the pre-calculated size from the scan phase so we don't
-/// need to re-walk the directory for byte counting.
 pub async fn delete_dir_instant(path: PathBuf, known_size: u64, dry_run: bool) -> DeleteResult {
     if dry_run {
         return DeleteResult::Success {
@@ -172,13 +166,10 @@ pub async fn delete_dir_instant(path: PathBuf, known_size: u64, dry_run: bool) -
         };
     }
 
-    // Try the rename trick first — rename is instant on the same filesystem,
-    // then delete the renamed directory (the original path disappears immediately).
     if let Some(trash) = trash_path_for(&path) {
         if std::fs::rename(&path, &trash).is_ok() {
-            // Delete the renamed directory on a blocking thread and wait for completion
             let result = tokio::task::spawn_blocking(move || fast_remove_dir_all_no_count(&trash))
-            .await;
+                .await;
 
             return match result {
                 Ok(Ok(())) => DeleteResult::Success {
@@ -195,15 +186,12 @@ pub async fn delete_dir_instant(path: PathBuf, known_size: u64, dry_run: bool) -
                 },
             };
         }
-        // rename failed (cross-device, permission, etc.) — fall through to direct delete
     }
 
     // Fallback: direct deletion (blocking)
     delete_dir(path, dry_run).await
 }
 
-/// Delete a single directory directly (blocking). Used as fallback and for
-/// headless CLI mode.
 pub async fn delete_dir(path: PathBuf, dry_run: bool) -> DeleteResult {
     if dry_run {
         let size = crate::sizer::calculate_size(&path);
