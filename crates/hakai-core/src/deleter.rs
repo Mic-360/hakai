@@ -217,18 +217,6 @@ pub async fn delete_dir(path: PathBuf, dry_run: bool) -> DeleteResult {
     }
 }
 
-/// Delete multiple directories concurrently (up to `concurrency` at once).
-// pub async fn delete_batch(
-//     paths: Vec<PathBuf>,
-//     dry_run: bool,
-//     concurrency: usize,
-// ) -> Vec<DeleteResult> {
-//     let items: Vec<(PathBuf, u64)> = paths.into_iter().map(|p| (p, 0)).collect();
-//     delete_batch_with_sizes(items, dry_run, concurrency).await
-// }
-
-/// Delete multiple directories concurrently (up to `concurrency` at once),
-/// using known sizes when available to select the instant rename-based path.
 pub async fn delete_batch_with_sizes(
     items: Vec<(PathBuf, u64)>,
     dry_run: bool,
