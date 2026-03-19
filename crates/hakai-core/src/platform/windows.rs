@@ -25,9 +25,16 @@ pub fn is_junction(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Clear read-only flags recursively (needed before deletion on Windows).
 pub fn clear_readonly_recursive(path: &Path) -> std::io::Result<()> {
-    for entry in walkdir::WalkDir::new(path).follow_links(false) {
+    let walker = ignore::WalkBuilder::new(path)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .follow_links(false)
+        .build();
+
+    for entry in walker {
         if let Ok(entry) = entry {
             if let Ok(meta) = entry.metadata() {
                 let mut perms = meta.permissions();
