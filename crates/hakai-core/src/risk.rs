@@ -2,7 +2,6 @@ use std::path::Path;
 
 use serde::Serialize;
 
-/// Risk levels assigned to discovered directories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
@@ -11,24 +10,15 @@ pub enum RiskLevel {
     High,
 }
 
-/// Result of risk analysis for a single found directory.
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskResult {
     pub is_dead: bool,
     pub risk_level: RiskLevel,
 }
 
-/// Analyze the risk of deleting the directory at `path`.
-///
-/// Logic (matching npkill):
-/// - **Dead/orphaned**: The parent directory has no `package.json` (for node_modules targets).
-/// - **High risk**: Path is in a global/system location.
-/// - **Medium risk**: Path appears to be a globally-installed package.
-/// - **Low risk**: Normal project node_modules.
 pub fn analyze_risk(path: &Path, target_name: &str) -> RiskResult {
     let parent = path.parent();
 
-    // Check if the parent dir has a package.json — if not, the node_modules is orphaned.
     let is_dead = if target_name == "node_modules" {
         match parent {
             Some(p) => !p.join("package.json").exists(),
@@ -46,43 +36,66 @@ pub fn analyze_risk(path: &Path, target_name: &str) -> RiskResult {
     }
 }
 
+#[inline]
+fn prefix_match(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len() && haystack[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
+#[inline]
+fn substring_match(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
+
+#[cfg(windows)]
+static HIGH_RISK_PREFIXES: &[&[u8]] = &[
+    b"c:\\program files",
+    b"c:\\program files (x86)",
+    b"c:\\windows",
+];
+
+#[cfg(windows)]
+static HIGH_RISK_CONTAINS: &[&[u8]] = &[b"\\appdata\\roaming\\npm"];
+
+#[cfg(unix)]
+static HIGH_RISK_PREFIXES: &[&[u8]] = &[
+    b"/usr/local/lib",
+    b"/usr/lib",
+    b"/opt/",
+    b"/System/",
+];
+
+static MEDIUM_RISK_CONTAINS: &[&[u8]] = &[b".nvm", b".volta", b".pnpm-store", b"nvm"];
+
 fn determine_risk_level(path: &Path) -> RiskLevel {
-    let path_str = path.to_string_lossy().to_lowercase();
+    let path_str = path.to_string_lossy();
+    let path_bytes = path_str.as_bytes();
 
-    // High risk: system-level locations
+    for prefix in HIGH_RISK_PREFIXES {
+        if prefix_match(path_bytes, prefix) {
+            return RiskLevel::High;
+        }
+    }
+
     #[cfg(windows)]
-    {
-        if path_str.starts_with("c:\\program files")
-            || path_str.starts_with("c:\\program files (x86)")
-            || path_str.starts_with("c:\\windows")
-            || path_str.contains("\\appdata\\roaming\\npm")
-        {
+    for pattern in HIGH_RISK_CONTAINS {
+        if substring_match(path_bytes, pattern) {
             return RiskLevel::High;
         }
     }
 
-    #[cfg(unix)]
-    {
-        if path_str.starts_with("/usr/local/lib")
-            || path_str.starts_with("/usr/lib")
-            || path_str.starts_with("/opt/")
-            || path_str.starts_with("/System/")
-        {
-            return RiskLevel::High;
+    for pattern in MEDIUM_RISK_CONTAINS {
+        if substring_match(path_bytes, pattern) {
+            return RiskLevel::Medium;
         }
     }
 
-    // Medium risk: global npm/nvm/volta/pnpm locations
-    if path_str.contains(".nvm")
-        || path_str.contains(".volta")
-        || path_str.contains(".pnpm-store")
-        || path_str.contains("nvm")
-    {
-        return RiskLevel::Medium;
-    }
-
     #[cfg(unix)]
-    if path_str.starts_with("/usr/local/") {
+    if prefix_match(path_bytes, b"/usr/local/") {
         return RiskLevel::Medium;
     }
 
@@ -112,7 +125,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let nm = tmp.path().join("node_modules");
         fs::create_dir(&nm).unwrap();
-        // No package.json in parent
 
         let result = analyze_risk(&nm, "node_modules");
         assert!(result.is_dead);
