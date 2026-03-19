@@ -337,9 +337,11 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "crossterm",
  "dirs",
  "humansize",
  "ignore",
+ "ratatui",
  "rayon",
  "serde",
  "serde_json",
@@ -347,7 +349,6 @@ dependencies = [
  "tokio",
  "toml",
  "walkdir",
- "which",
  "windows",
 ]
 
