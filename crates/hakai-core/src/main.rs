@@ -249,8 +249,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
         scanner::scan_parallel(&opts_clone, &tx, cancel);
     });
 
-    let mut results: Vec<JsonResult> = Vec::new();
-    let mut total_size = 0u64;
+    let (result_tx, result_rx) = crossbeam_channel::unbounded::<JsonResult>();
     let mut duration_ms = 0u64;
 
     for event in rx {
@@ -297,12 +296,21 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             scanner::ScanEvent::Progress { .. } => {}
         }
     }
+    drop(result_tx);
 
-    // Sort results
-    let sort_mode = args
-        .sort
-        .as_deref()
-        .unwrap_or(&"path");
+    let mut results: Vec<JsonResult> = Vec::new();
+    let mut total_size = 0u64;
+    for jr in result_rx {
+        total_size += jr.size;
+        if args.json_stream {
+            if let Ok(json) = serde_json::to_string(&jr) {
+                println!("{json}");
+            }
+        }
+        results.push(jr);
+    }
+
+    let sort_mode = args.sort.as_deref().unwrap_or("path");
     match sort_mode {
         "size" => results.sort_by(|a, b| b.size.cmp(&a.size)),
         "last-mod" => results.sort_by(|a, b| b.modification_time.cmp(&a.modification_time)),
@@ -384,4 +392,3 @@ fn format_human_size(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
-
