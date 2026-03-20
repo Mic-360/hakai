@@ -327,7 +327,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             summary: JsonSummary {
                 total_found,
                 total_size_bytes: total_size,
-                total_size_human: format_human_size(total_size),
+                total_size_human: util::format_size(total_size),
             },
         };
         if let Ok(json) = serde_json::to_string_pretty(&output) {
@@ -339,7 +339,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             return;
         }
 
-        let total_display = format_human_size(total_size);
+        let total_display = util::format_size(total_size);
         if !args.yes {
             eprintln!(
                 "🔵 Red, 🔴 Blue... 🟣 Hollow Purple! Prepare to delete {} directories ({}). Continue? [y/N] ",
@@ -354,37 +354,25 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             }
         }
 
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         let items: Vec<(PathBuf, u64)> = results
             .iter()
             .map(|r| (PathBuf::from(&r.path), r.size))
             .collect();
-        let delete_results = rt.block_on(deleter::delete_batch_with_sizes(items, args.dry_run, 8));
+        let delete_results = deleter::delete_batch(items, args.dry_run);
 
         let mut total_freed = 0u64;
         for result in &delete_results {
             match result {
                 deleter::DeleteResult::Success { path, freed_bytes } => {
                     total_freed += freed_bytes;
-                    eprintln!("✓ Deleted: {} ({})", path.display(), format_human_size(*freed_bytes));
+                    eprintln!("✓ Deleted: {} ({})", path.display(), util::format_size(*freed_bytes));
                 }
-                deleter::DeleteResult::Error { path, message } => {
+                deleter::DeleteResult::Error { path, message, freed_bytes } => {
+                    total_freed += freed_bytes;
                     eprintln!("✗ Error: {} — {}", path.display(), message);
                 }
             }
         }
-        eprintln!("\n🦀 Freed: {}. Domain Expansion: Infinite Free Space!", format_human_size(total_freed));
-    }
-}
-
-fn format_human_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
+        eprintln!("\n🦀 Freed: {}. Domain Expansion: Infinite Free Space!", util::format_size(total_freed));
     }
 }
