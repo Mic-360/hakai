@@ -1,11 +1,13 @@
 mod config;
 mod deleter;
+#[cfg(feature = "ipc")]
 mod ipc;
 pub mod platform;
 mod risk;
 mod scanner;
 mod sizer;
 mod tui;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -161,13 +163,19 @@ fn main() {
     }
 
     if args.ipc {
-        // IPC server mode — communicate with Bun TUI via stdin/stdout JSON
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(ipc::run_ipc_server(&cfg));
-        return;
+        #[cfg(feature = "ipc")]
+        {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(ipc::run_ipc_server(&cfg));
+            return;
+        }
+        #[cfg(not(feature = "ipc"))]
+        {
+            eprintln!("IPC mode requires the 'ipc' feature. Build with: cargo build --features ipc");
+            return;
+        }
     }
 
-    // Determine targets
     let targets = if let Some(profile_name) = &args.profile {
         let builtins = config::builtin_profiles();
         let all_profiles = cfg.profiles.iter().chain(builtins.iter());
