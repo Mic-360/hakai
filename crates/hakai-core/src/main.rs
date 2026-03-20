@@ -5,16 +5,18 @@ pub mod platform;
 mod risk;
 mod scanner;
 mod sizer;
+mod tui;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use clap::Parser;
 use serde::Serialize;
 
 use scanner::ScanOptions;
 
-/// 🦀 hakai — The strongest directory destroyer (Rust + Bun)
+/// 🦀 hakai — The strongest directory destroyer
 #[derive(Parser, Debug)]
 #[command(name = "hakai", version = "1.0.0", about = "🦀 Hakai — \"Throughout the filesystem, I alone am the honored one.\"")]
 struct Args {
@@ -97,6 +99,10 @@ struct Args {
     /// Size unit: auto, mb, gb
     #[arg(long = "size-unit")]
     size_unit: Option<String>,
+
+    /// Minimum directory size to display (e.g. 10mb, 1gb)
+    #[arg(long = "min-size")]
+    min_size: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -163,8 +169,8 @@ fn main() {
 
     // Determine targets
     let targets = if let Some(profile_name) = &args.profile {
-        let profiles = config::builtin_profiles();
-        let all_profiles = cfg.profiles.iter().chain(profiles.iter());
+        let builtins = config::builtin_profiles();
+        let all_profiles = cfg.profiles.iter().chain(builtins.iter());
         let mut found = None;
         for (name, profile) in all_profiles {
             if name == profile_name {
@@ -206,31 +212,41 @@ fn main() {
         // Headless mode
         run_headless(args, scan_opts, &targets);
     } else {
-        // Try to spawn TUI
-        match find_tui_binary() {
-            Some(tui_path) => {
-                spawn_tui(&tui_path, &root, &targets, &args);
-            }
-            None => {
-                eprintln!("hakai-tui not found. Use --json for headless mode or install the TUI component.");
-                eprintln!("Falling back to headless JSON stream mode...\n");
-                let args_headless = Args {
-                    json_stream: true,
-                    ..args
-                };
-                run_headless(args_headless, scan_opts, &targets);
-            }
+        // Interactive TUI mode (built-in ratatui)
+        let sort_mode = match args.sort.as_deref().unwrap_or(&cfg.settings.default_sort) {
+            "size" => tui::app::SortMode::Size,
+            "last-mod" => tui::app::SortMode::LastMod,
+            _ => tui::app::SortMode::Path,
+        };
+        let min_size_bytes = args.min_size.as_deref().and_then(parse_size);
+
+        if let Err(e) = tui::run_tui(scan_opts, sort_mode, args.dry_run, min_size_bytes) {
+            eprintln!("TUI error: {e}");
+            std::process::exit(1);
         }
+    }
+}
+
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+    if let Some(num) = s.strip_suffix("gb") {
+        num.trim().parse::<f64>().ok().map(|n| (n * 1_073_741_824.0) as u64)
+    } else if let Some(num) = s.strip_suffix("mb") {
+        num.trim().parse::<f64>().ok().map(|n| (n * 1_048_576.0) as u64)
+    } else if let Some(num) = s.strip_suffix("kb") {
+        num.trim().parse::<f64>().ok().map(|n| (n * 1024.0) as u64)
+    } else {
+        s.parse::<u64>().ok()
     }
 }
 
 fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
     let (tx, rx) = crossbeam_channel::unbounded();
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
 
     let opts_clone = scan_opts.clone();
     std::thread::spawn(move || {
-        scanner::scan_parallel(&opts_clone, &tx, &cancel);
+        scanner::scan_parallel(&opts_clone, &tx, cancel);
     });
 
     let mut results: Vec<JsonResult> = Vec::new();
@@ -370,100 +386,3 @@ fn format_human_size(bytes: u64) -> String {
     }
 }
 
-fn find_tui_binary() -> Option<PathBuf> {
-    // Check next to our own executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidates = if cfg!(windows) {
-                vec![dir.join("hakai-tui.exe")]
-            } else {
-                vec![dir.join("hakai-tui")]
-            };
-            for c in candidates {
-                if c.exists() {
-                    return Some(c);
-                }
-            }
-        }
-    }
-
-    // Check PATH
-    let name = if cfg!(windows) {
-        "hakai-tui.exe"
-    } else {
-        "hakai-tui"
-    };
-    if let Ok(path) = which::which(name) {
-        return Some(path);
-    }
-
-    // Check if bun is available and we can run the TUI source directly
-    if which::which("bun").is_ok() {
-        // Look for the TUI source relative to our binary or cwd
-        let candidates = vec![
-            PathBuf::from("packages/hakai-tui/src/index.ts"),
-            std::env::current_exe()
-                .ok()
-                .and_then(|e| e.parent().map(|p| p.join("../packages/hakai-tui/src/index.ts")))
-                .unwrap_or_default(),
-        ];
-        for c in candidates {
-            if c.exists() {
-                return Some(c);
-            }
-        }
-    }
-
-    None
-}
-
-fn spawn_tui(tui_path: &PathBuf, root: &PathBuf, targets: &[String], args: &Args) {
-    use std::process::{Command, Stdio};
-
-    let is_ts = tui_path
-        .extension()
-        .map(|e| e == "ts")
-        .unwrap_or(false);
-
-    let mut cmd = if is_ts {
-        let mut c = Command::new("bun");
-        c.arg("run").arg(tui_path);
-        c
-    } else {
-        Command::new(tui_path)
-    };
-
-    // Pass the current exe path so TUI can spawn us in IPC mode
-    if let Ok(exe) = std::env::current_exe() {
-        cmd.env("HAKAI_CORE_BIN", exe);
-    }
-    cmd.env("HAKAI_ROOT", root);
-    cmd.env("HAKAI_TARGETS", targets.join(","));
-
-    if args.exclude_hidden {
-        cmd.env("HAKAI_EXCLUDE_HIDDEN", "1");
-    }
-    if args.dry_run {
-        cmd.env("HAKAI_DRY_RUN", "1");
-    }
-    if let Some(ref sort) = args.sort {
-        cmd.env("HAKAI_SORT", sort);
-    }
-    if let Some(ref color) = args.color {
-        cmd.env("HAKAI_COLOR", color);
-    }
-
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    match cmd.status() {
-        Ok(status) => {
-            std::process::exit(status.code().unwrap_or(0));
-        }
-        Err(e) => {
-            eprintln!("Failed to start TUI: {e}");
-            std::process::exit(1);
-        }
-    }
-}

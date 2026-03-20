@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -71,101 +71,111 @@ pub struct ExcludeConfig {
     pub directories: Vec<String>,
 }
 
-/// Built-in profiles available without a config file.
-pub fn builtin_profiles() -> HashMap<String, Profile> {
-    let mut m = HashMap::new();
-    m.insert(
-        "node".into(),
-        Profile {
-            targets: vec!["node_modules".into()],
-        },
-    );
-    m.insert(
-        "rust".into(),
-        Profile {
-            targets: vec!["target".into()],
-        },
-    );
-    m.insert(
-        "python".into(),
-        Profile {
-            targets: vec![
-                "__pycache__".into(),
-                ".venv".into(),
-                "venv".into(),
-                ".mypy_cache".into(),
-                ".ruff_cache".into(),
-                ".pytest_cache".into(),
-            ],
-        },
-    );
-    m.insert(
-        "flutter".into(),
-        Profile {
-            targets: vec![
-                "build".into(),
-                ".dart_tool".into(),
-                "ios/Pods".into(),
-                "android/build".into(),
-                "android/.gradle".into(),
-            ],
-        },
-    );
-    m.insert(
-        "java".into(),
-        Profile {
-            targets: vec![
-                "build".into(),
-                ".gradle".into(),
-                "out".into(),
-                "target".into(),
-            ],
-        },
-    );
-    m.insert(
-        "all".into(),
-        Profile {
-            targets: vec![
-                "node_modules".into(),
-                "target".into(),
-                "__pycache__".into(),
-                ".venv".into(),
-                "venv".into(),
-                "dist".into(),
-                ".next".into(),
-                ".nuxt".into(),
-                ".output".into(),
-                ".turbo".into(),
-                ".svelte-kit".into(),
-                "build".into(),
-                ".gradle".into(),
-                ".dart_tool".into(),
-                ".mypy_cache".into(),
-            ],
-        },
-    );
-    m
+/// Built-in profiles available without a config file (cached).
+pub fn builtin_profiles() -> &'static HashMap<String, Profile> {
+    use std::sync::LazyLock;
+    static PROFILES: LazyLock<HashMap<String, Profile>> = LazyLock::new(|| {
+        let mut m = HashMap::new();
+        m.insert(
+            "node".into(),
+            Profile {
+                targets: vec!["node_modules".into()],
+            },
+        );
+        m.insert(
+            "rust".into(),
+            Profile {
+                targets: vec!["target".into()],
+            },
+        );
+        m.insert(
+            "python".into(),
+            Profile {
+                targets: vec![
+                    "__pycache__".into(),
+                    ".venv".into(),
+                    "venv".into(),
+                    ".mypy_cache".into(),
+                    ".ruff_cache".into(),
+                    ".pytest_cache".into(),
+                ],
+            },
+        );
+        m.insert(
+            "flutter".into(),
+            Profile {
+                targets: vec![
+                    "build".into(),
+                    ".dart_tool".into(),
+                    "ios/Pods".into(),
+                    "android/build".into(),
+                    "android/.gradle".into(),
+                ],
+            },
+        );
+        m.insert(
+            "java".into(),
+            Profile {
+                targets: vec![
+                    "build".into(),
+                    ".gradle".into(),
+                    "out".into(),
+                    "target".into(),
+                ],
+            },
+        );
+        m.insert(
+            "all".into(),
+            Profile {
+                targets: vec![
+                    "node_modules".into(),
+                    "target".into(),
+                    "__pycache__".into(),
+                    ".venv".into(),
+                    "venv".into(),
+                    "dist".into(),
+                    ".next".into(),
+                    ".nuxt".into(),
+                    ".output".into(),
+                    ".turbo".into(),
+                    ".svelte-kit".into(),
+                    "build".into(),
+                    ".gradle".into(),
+                    ".dart_tool".into(),
+                    ".mypy_cache".into(),
+                ],
+            },
+        );
+        m
+    });
+    &PROFILES
 }
 
-/// Load config from `~/.hakairc` or `./hakairc`, falling back to defaults.
+/// Load config by walking up from CWD, then checking `~/.hakairc`, falling back to defaults.
 pub fn load_config() -> HakaiConfig {
-    // Try local first, then home dir
-    let candidates: Vec<PathBuf> = vec![
-        PathBuf::from(".hakairc"),
-        dirs::home_dir()
-            .map(|h| h.join(".hakairc"))
-            .unwrap_or_default(),
-    ];
+    // Walk up from CWD looking for .hakairc (monorepo-friendly)
+    if let Ok(mut dir) = std::env::current_dir() {
+        loop {
+            let candidate = dir.join(".hakairc");
+            if let Ok(config) = load_config_from(&candidate) {
+                return config;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
 
-    for path in &candidates {
-        if let Ok(config) = load_config_from(path) {
+    // Try home directory
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(config) = load_config_from(&home.join(".hakairc")) {
             return config;
         }
     }
 
     // Return default with built-in profiles
     let mut config = HakaiConfig::default();
-    config.profiles = builtin_profiles();
+    config.profiles = builtin_profiles().clone();
     config
 }
 
@@ -174,9 +184,8 @@ fn load_config_from(path: &Path) -> Result<HakaiConfig> {
     let mut config: HakaiConfig = toml::from_str(&content)?;
 
     // Merge built-in profiles (user profiles take precedence)
-    let builtins = builtin_profiles();
-    for (name, profile) in builtins {
-        config.profiles.entry(name).or_insert(profile);
+    for (name, profile) in builtin_profiles() {
+        config.profiles.entry(name.clone()).or_insert(profile.clone());
     }
 
     Ok(config)
@@ -188,14 +197,12 @@ mod tests {
 
     #[test]
     fn default_config_has_builtin_profiles() {
-        let config = HakaiConfig::default();
-        let mut config = config;
-        config.profiles = builtin_profiles();
+        let profiles = builtin_profiles();
 
-        assert!(config.profiles.contains_key("node"));
-        assert!(config.profiles.contains_key("rust"));
-        assert!(config.profiles.contains_key("python"));
-        assert!(config.profiles.contains_key("all"));
+        assert!(profiles.contains_key("node"));
+        assert!(profiles.contains_key("rust"));
+        assert!(profiles.contains_key("python"));
+        assert!(profiles.contains_key("all"));
     }
 
     #[test]

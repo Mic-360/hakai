@@ -101,7 +101,7 @@ fn parallel_delete_recursive(dir: &Path, freed: Option<&AtomicU64>) {
 }
 
 /// Full parallel directory removal. Returns total bytes freed.
-fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
+pub fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
     if !path.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -126,7 +126,7 @@ fn fast_remove_dir_all(path: &Path) -> std::io::Result<u64> {
 }
 
 /// Full parallel directory removal without byte counting.
-fn fast_remove_dir_all_no_count(path: &Path) -> std::io::Result<()> {
+pub fn fast_remove_dir_all_no_count(path: &Path) -> std::io::Result<()> {
     if !path.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -148,7 +148,7 @@ fn fast_remove_dir_all_no_count(path: &Path) -> std::io::Result<()> {
 }
 
 /// Generate a unique trash directory name next to the target.
-fn trash_path_for(path: &Path) -> Option<PathBuf> {
+pub fn trash_path_for(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -312,7 +312,8 @@ mod tests {
         let dir2 = tmp.path().join("nonexistent_dir_xyz_12345");
         fs::create_dir(&dir1).unwrap();
 
-        let results = delete_batch(vec![dir1, dir2], false, 4).await;
+        let items = vec![(dir1, 0u64), (dir2, 0u64)];
+        let results = delete_batch_with_sizes(items, false, 4).await;
         assert_eq!(results.len(), 2);
         // First should succeed, second should error
         assert!(matches!(&results[0], DeleteResult::Success { .. }));

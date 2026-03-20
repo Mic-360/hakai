@@ -48,7 +48,10 @@ pub enum IpcCommand {
 #[derive(Debug, Serialize)]
 #[serde(tag = "event")]
 pub enum IpcEvent {
-    Ready,
+    Ready {
+        version: String,
+        protocol: u32,
+    },
     ScanFound {
         path: String,
     },
@@ -104,7 +107,10 @@ fn emit_sync(event: &IpcEvent) {
 
 /// Run the IPC server loop — reads JSON commands from stdin, dispatches actions.
 pub async fn run_ipc_server(_config: &HakaiConfig) {
-    emit(&IpcEvent::Ready).await;
+    emit(&IpcEvent::Ready {
+        version: "1.0.0".into(),
+        protocol: 1,
+    }).await;
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -165,7 +171,7 @@ async fn handle_command(
             // Spawn scanner on a blocking thread pool
             let scan_opts = opts.clone();
             tokio::task::spawn_blocking(move || {
-                scanner::scan_parallel(&scan_opts, &tx, &cancel);
+                scanner::scan_parallel(&scan_opts, &tx, cancel);
             });
 
             // Forward scan events as IPC events
