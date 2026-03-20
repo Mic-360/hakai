@@ -3,7 +3,7 @@ param(
     [switch]$AddToPath  = $true
 )
 
-Write-Host "💀 Installing hakai..." -ForegroundColor Red
+Write-Host "🦀 Installing hakai..." -ForegroundColor Green
 
 # 1. Create install directory
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -11,11 +11,6 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 # 2. Build from source
 Write-Host "Building Rust core..." -ForegroundColor Yellow
 cargo build --release
-
-Write-Host "Building Bun TUI..." -ForegroundColor Yellow
-Push-Location packages\hakai-tui
-bun build --compile --target=bun src/index.ts --outfile="$InstallDir\hakai-tui.exe"
-Pop-Location
 
 # 3. Copy Rust binary
 Copy-Item "target\release\hakai.exe" "$InstallDir\hakai.exe" -Force
@@ -30,6 +25,6 @@ if ($AddToPath) {
 }
 
 Write-Host ""
-Write-Host "💀 hakai installed to $InstallDir" -ForegroundColor Green
+Write-Host "🦀 hakai installed to $InstallDir" -ForegroundColor Green
 Write-Host "   Run: hakai" -ForegroundColor Cyan
 Write-Host "   Run: hakai --help for options" -ForegroundColor Cyan
