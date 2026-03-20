@@ -11,18 +11,21 @@ use std::time::Duration;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use crossterm::style::Stylize;
+
 use crate::risk::RiskLevel;
 use crate::scanner::{ScanEvent, ScanOptions};
+use crate::util::format_size;
 use crate::{deleter, risk, scanner, sizer};
 
-use app::{App, AppMode, SortMode};
+use app::{App, AppMode, FolderStatus, SortMode};
 
 enum AppEvent {
     Key(KeyEvent),
@@ -69,7 +72,45 @@ pub fn run_tui(
         crossterm::cursor::Show
     )?;
 
+    print_quit_summary(&app);
+
     result
+}
+
+fn print_quit_summary(app: &App) {
+    let deleted_count = app
+        .results
+        .iter()
+        .filter(|r| r.status == FolderStatus::Deleted)
+        .count();
+    let scanned = app.found_count();
+
+    if scanned == 0 {
+        return;
+    }
+
+    if deleted_count > 0 {
+        let freed = format_size(app.freed_space);
+        let duration = format!("{:.1}s", app.scan_duration_ms as f64 / 1000.0);
+        println!(
+            "{}",
+            format!(
+                "\u{1f980} hakai \u{2014} session complete\n  Scanned {} dirs \u{00b7} Deleted {} \u{00b7} Freed {} \u{00b7} {}",
+                scanned, deleted_count, freed, duration
+            )
+            .green()
+        );
+    } else {
+        let total = format_size(app.total_size);
+        println!(
+            "{}",
+            format!(
+                "\u{1f980} hakai \u{2014} nothing deleted\n  Scanned {} dirs \u{00b7} {} reclaimable",
+                scanned, total
+            )
+            .dark_grey()
+        );
+    }
 }
 
 fn run_event_loop(

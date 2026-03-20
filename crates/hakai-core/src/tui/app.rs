@@ -471,6 +471,7 @@ impl App {
         self.results.len()
     }
 
+    #[allow(dead_code)]
     pub fn max_result_size(&self) -> u64 {
         self.results.iter().map(|r| r.size_bytes).max().unwrap_or(1)
     }
