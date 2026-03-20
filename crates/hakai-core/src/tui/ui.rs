@@ -1,5 +1,5 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -450,7 +450,7 @@ fn truncate_path(path: &str, max_len: usize) -> String {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let sep = "\u{2500}".repeat(area.width as usize);
-    let sep_line = Line::from(Span::styled(sep, theme::dim()));
+    let sep_line = Line::from(Span::styled(sep, theme::border()));
 
     let hints = match app.mode {
         AppMode::MultiSelect | AppMode::RangeSelect => {
@@ -544,7 +544,8 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::highlight())
-        .title(Span::styled(title, theme::highlight()));
+        .title(Span::styled(title, theme::highlight()))
+        .style(theme::popup_block());
 
     let para = Paragraph::new(content).block(block);
     frame.render_widget(para, popup_area);
@@ -565,7 +566,8 @@ fn draw_error_popup(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::error())
-        .title(Span::styled(title, theme::error()));
+        .title(Span::styled(title, theme::error()))
+        .style(theme::popup_block());
 
     let max_lines = height.saturating_sub(3) as usize;
     let start = app.errors.len().saturating_sub(max_lines);
@@ -619,7 +621,8 @@ fn draw_preview_popup(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::highlight())
-        .title(Span::styled(title, theme::highlight()));
+        .title(Span::styled(title, theme::highlight()))
+        .style(theme::popup_block());
 
     let inner_width = width.saturating_sub(4) as usize;
 
@@ -671,7 +674,8 @@ fn draw_help_popup(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::highlight())
-        .title(Span::styled(" Keybindings ", theme::highlight()));
+        .title(Span::styled(" Keybindings ", theme::highlight()))
+        .style(theme::popup_block());
 
     let bindings = vec![
         ("Up/Down, j/k", "Navigate"),
