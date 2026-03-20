@@ -86,7 +86,6 @@ struct Args {
     #[arg(long = "no-parallel")]
     no_parallel: bool,
 
-    /// Run in IPC server mode (used by hakai-tui)
     #[arg(long = "ipc", hide = true)]
     ipc: bool,
 
@@ -147,7 +146,6 @@ fn main() {
     let args = Args::parse();
     let cfg = config::load_config();
 
-    // Configure thread pool
     if let Some(threads) = args.threads {
         if threads > 0 {
             rayon::ThreadPoolBuilder::new()
@@ -196,7 +194,6 @@ fn main() {
         vec!["node_modules".into()]
     };
 
-    // Determine root directory
     let root = if args.full {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
     } else if let Some(ref d) = args.directory {
@@ -217,10 +214,8 @@ fn main() {
     };
 
     if args.json || args.json_stream || args.delete_all {
-        // Headless mode
         run_headless(args, scan_opts, &targets);
     } else {
-        // Interactive TUI mode (built-in ratatui)
         let sort_mode = match args.sort.as_deref().unwrap_or(&cfg.settings.default_sort) {
             "size" => tui::app::SortMode::Size,
             "last-mod" => tui::app::SortMode::LastMod,
