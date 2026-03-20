@@ -100,8 +100,9 @@ async fn emit(event: &IpcEvent) {
 fn emit_sync(event: &IpcEvent) {
     if let Ok(json) = serde_json::to_string(event) {
         let line = format!("{json}\n");
-        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut stdout = std::io::stdout().lock();
+        let _ = std::io::Write::write_all(&mut stdout, line.as_bytes());
+        let _ = std::io::Write::flush(&mut stdout);
     }
 }
 
