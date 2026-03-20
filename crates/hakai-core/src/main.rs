@@ -255,31 +255,24 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
     for event in rx {
         match event {
             scanner::ScanEvent::Found { path } => {
-                let (size, newest) = sizer::calculate_size_and_mtime(&path);
+                let tx = result_tx.clone();
+                rayon::spawn(move || {
+                    let (size, newest) = sizer::calculate_size_and_mtime(&path);
+                    let target_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    let risk_result = risk::analyze_risk(&path, target_name);
 
-                let target_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-                let risk_result = risk::analyze_risk(&path, target_name);
-
-                total_size += size;
-
-                let jr = JsonResult {
-                    path: path.to_string_lossy().to_string(),
-                    size,
-                    modification_time: newest,
-                    is_dead: risk_result.is_dead,
-                    risk_level: format!("{:?}", risk_result.risk_level).to_lowercase(),
-                };
-
-                if args.json_stream {
-                    if let Ok(json) = serde_json::to_string(&jr) {
-                        println!("{json}");
-                    }
-                }
-
-                results.push(jr);
+                    let jr = JsonResult {
+                        path: path.to_string_lossy().to_string(),
+                        size,
+                        modification_time: newest,
+                        is_dead: risk_result.is_dead,
+                        risk_level: format!("{:?}", risk_result.risk_level).to_lowercase(),
+                    };
+                    let _ = tx.send(jr);
+                });
             }
             scanner::ScanEvent::Complete {
                 total_found: _,
