@@ -28,9 +28,9 @@ fn age_color(newest_ms: u64) -> Style {
         .as_millis() as u64;
     let age_days = now_ms.saturating_sub(newest_ms) / 86_400_000;
     if age_days > 365 {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme::AGE_OLD)
     } else if age_days > 180 {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(theme::AGE_MID)
     } else {
         Style::default().fg(theme::WHITE)
     }
@@ -45,18 +45,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(3), // header
         Constraint::Length(1), // stats
         Constraint::Length(1), // progress
+        Constraint::Length(1), // spacer between progress and results
         Constraint::Min(3),   // results list
         Constraint::Length(2), // status bar
     ])
     .split(area);
 
-    app.list_height = chunks[3].height.saturating_sub(0) as usize;
+    app.list_height = chunks[4].height.saturating_sub(0) as usize;
 
     draw_header(frame, app, chunks[0]);
     draw_stats(frame, app, chunks[1]);
     draw_progress(frame, app, chunks[2]);
-    draw_results(frame, app, chunks[3]);
-    draw_status_bar(frame, app, chunks[4]);
+    // chunks[3] = spacer (empty row for breathing room)
+    draw_results(frame, app, chunks[4]);
+    draw_status_bar(frame, app, chunks[5]);
 
     if app.show_errors && !app.errors.is_empty() {
         draw_error_popup(frame, app, area);
@@ -106,7 +108,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     ]);
 
     let sep = "\u{2500}".repeat(area.width as usize);
-    let sep_line = Line::from(Span::styled(sep, theme::dim()));
+    let sep_line = Line::from(Span::styled(sep, theme::border()));
 
     let para = Paragraph::new(vec![title_line, quote_line, sep_line]);
     frame.render_widget(para, area);
@@ -252,7 +254,6 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let start = app.scroll_offset;
     let end = (start + visible_h).min(app.filtered_indices.len());
 
-    let max_size = app.max_result_size();
     let search_query = &app.search_query;
 
     let items: Vec<ListItem> = (start..end)
@@ -270,7 +271,6 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
                 app.mode,
                 area.width,
                 is_pending,
-                max_size,
                 search_query,
             )
         })
@@ -280,29 +280,6 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(list, area);
 }
 
-fn size_bar(size: u64, max_size: u64, width: usize) -> String {
-    const BAR_CHARS: &[char] = &[' ', '\u{258f}', '\u{258e}', '\u{258d}', '\u{258c}', '\u{258b}', '\u{258a}', '\u{2589}', '\u{2588}'];
-    if max_size == 0 || size == 0 {
-        return " ".repeat(width);
-    }
-    let ratio = size as f64 / max_size as f64;
-    let filled = ratio * width as f64;
-    let full_blocks = filled as usize;
-    let remainder = ((filled - full_blocks as f64) * 8.0) as usize;
-
-    let mut bar = String::with_capacity(width);
-    for _ in 0..full_blocks.min(width) {
-        bar.push('\u{2588}');
-    }
-    if full_blocks < width && remainder > 0 {
-        bar.push(BAR_CHARS[remainder]);
-    }
-    while bar.chars().count() < width {
-        bar.push(' ');
-    }
-    bar
-}
-
 fn build_result_line(
     r: &super::app::FolderResult,
     is_selected: bool,
@@ -310,7 +287,6 @@ fn build_result_line(
     mode: AppMode,
     width: u16,
     is_pending_delete: bool,
-    max_size: u64,
     search_query: &str,
 ) -> ListItem<'static> {
     let prefix = match mode {
@@ -323,7 +299,7 @@ fn build_result_line(
         }
         _ => {
             if is_selected {
-                Span::styled("  \u{2192} ", theme::highlight())
+                Span::styled("  \u{25b6} ", theme::highlight())
             } else {
                 Span::raw("    ")
             }
@@ -357,31 +333,42 @@ fn build_result_line(
         }
     };
 
-    let size_str = if r.size_bytes > 0 {
-        format_size(r.size_bytes)
-    } else {
-        "...".into()
-    };
+    // ── Fixed-width 4-column layout ──
+    // [prefix][path (fill)][project (max 30)][age (12)][size (10)][risk][status][pad]
+    const PROJECT_COL_MAX: usize = 30;
+    const RIGHT_PAD: usize = 2; // prevent clipping at terminal right edge
+
+    let size_str = if r.size_bytes > 0 { format_size(r.size_bytes) } else { "...".into() };
     let age_str = format_age(r.newest_ms);
-    let bar = size_bar(r.size_bytes, max_size, 5);
-    let meta = format!("  {age_str:>10} {bar} {size_str:>10}");
-    let meta_len = meta.len();
 
+    // Right-side fixed columns
+    let age_col = format!("{age_str:>12}");
+    let size_col = format!("{size_str:>10}");
+    let right_w = 12 + 10 + risk_len + status_len + RIGHT_PAD;
+
+    // Project tag with truncation
     let project_tag = r.project_name.as_deref().unwrap_or("");
-    let project_len = if project_tag.is_empty() { 0 } else { project_tag.len() + 3 };
+    let project_display = if project_tag.is_empty() {
+        String::new()
+    } else {
+        let max_tag = PROJECT_COL_MAX.saturating_sub(3);
+        if project_tag.len() > max_tag {
+            format!(" ({}...)", &project_tag[..max_tag.saturating_sub(3)])
+        } else {
+            format!(" ({})", project_tag)
+        }
+    };
 
+    // Path fills remaining width → age+size always at fixed position from right
     let prefix_len: usize = match mode {
         AppMode::MultiSelect | AppMode::RangeSelect => 6,
         _ => 4,
     };
-    let avail = (width as usize)
-        .saturating_sub(prefix_len)
-        .saturating_sub(meta_len)
-        .saturating_sub(status_len)
-        .saturating_sub(risk_len)
-        .saturating_sub(project_len);
+    let left_w = (width as usize).saturating_sub(prefix_len).saturating_sub(right_w);
+    let path_avail = left_w.saturating_sub(project_display.len());
     let path_str = r.path.to_string_lossy().to_string();
-    let path_display = truncate_path(&path_str, avail);
+    let path_display = truncate_path(&path_str, path_avail);
+    let pad_len = path_avail.saturating_sub(path_display.len());
 
     let path_style = match r.status {
         FolderStatus::Deleted => theme::dim(),
@@ -392,6 +379,7 @@ fn build_result_line(
 
     let mut spans = vec![prefix];
 
+    // Path with optional search highlighting
     if !search_query.is_empty() && r.status != FolderStatus::Deleted {
         let path_lower = path_display.to_lowercase();
         let query_lower = search_query.to_lowercase();
@@ -413,11 +401,19 @@ fn build_result_line(
         spans.push(Span::styled(path_display, path_style));
     }
 
-    if !project_tag.is_empty() {
-        spans.push(Span::styled(format!(" ({project_tag})"), theme::dim()));
+    // Padding to align fixed columns
+    if pad_len > 0 {
+        spans.push(Span::raw(" ".repeat(pad_len)));
     }
 
-    spans.push(Span::styled(meta, theme::dim()));
+    // Project tag column
+    if !project_display.is_empty() {
+        spans.push(Span::styled(project_display, theme::dim()));
+    }
+
+    // Fixed-width age and size columns (right-aligned)
+    spans.push(Span::styled(age_col, theme::dim()));
+    spans.push(Span::styled(size_col, theme::dim()));
 
     if risk_len > 0 {
         spans.push(risk_span);
