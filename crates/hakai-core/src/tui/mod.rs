@@ -88,7 +88,7 @@ fn run_event_loop(
             if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(evt) = event::read() {
                     match evt {
-                        Event::Key(key) => {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
                             input_tx.send(AppEvent::Key(key)).ok();
                         }
                         Event::Mouse(mouse) => {
