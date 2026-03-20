@@ -4,7 +4,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{format_age, format_size, App, AppMode, FolderStatus};
+use super::app::{format_age, App, AppMode, FolderStatus};
+use crate::util::format_size;
 use super::theme;
 
 const SPINNER: &[char] = &['\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}'];
