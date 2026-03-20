@@ -12,8 +12,6 @@ use crate::risk;
 use crate::scanner::{self, ScanEvent, ScanOptions};
 use crate::sizer;
 
-// ── Commands Rust receives FROM Bun ──────────────────────────────
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd")]
 pub enum IpcCommand {
@@ -42,8 +40,6 @@ pub enum IpcCommand {
         target: String,
     },
 }
-
-// ── Events Rust sends TO Bun ─────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "event")]
@@ -86,7 +82,6 @@ pub enum IpcEvent {
     },
 }
 
-/// Write a single IPC event as a JSON line to stdout.
 async fn emit(event: &IpcEvent) {
     let mut stdout = tokio::io::stdout();
     if let Ok(json) = serde_json::to_string(event) {
@@ -96,7 +91,6 @@ async fn emit(event: &IpcEvent) {
     }
 }
 
-/// Emit an event synchronously (for use from non-async contexts like scanner threads).
 fn emit_sync(event: &IpcEvent) {
     if let Ok(json) = serde_json::to_string(event) {
         let line = format!("{json}\n");
@@ -106,12 +100,12 @@ fn emit_sync(event: &IpcEvent) {
     }
 }
 
-/// Run the IPC server loop — reads JSON commands from stdin, dispatches actions.
 pub async fn run_ipc_server(_config: &HakaiConfig) {
     emit(&IpcEvent::Ready {
         version: "1.0.0".into(),
         protocol: 1,
-    }).await;
+    })
+    .await;
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
