@@ -163,13 +163,11 @@ async fn handle_command(
             let (tx, rx) = crossbeam_channel::unbounded();
             let cancel = cancel_flag.clone();
 
-            // Spawn scanner on a blocking thread pool
             let scan_opts = opts.clone();
             tokio::task::spawn_blocking(move || {
                 scanner::scan_parallel(&scan_opts, &tx, cancel);
             });
 
-            // Forward scan events as IPC events
             while let Ok(event) = rx.recv() {
                 match event {
                     ScanEvent::Found { path } => {
@@ -177,7 +175,6 @@ async fn handle_command(
                         found_paths.push(path.clone());
                         emit(&IpcEvent::ScanFound { path: path_str }).await;
 
-                        // Concurrently calculate size and track it
                         let p = path.clone();
                         let sizes = known_sizes.clone();
                         tokio::task::spawn_blocking(move || {
@@ -245,7 +242,11 @@ async fn handle_command(
             .await;
         }
 
-        IpcCommand::Delete { paths, sizes, dry_run } => {
+        IpcCommand::Delete {
+            paths,
+            sizes,
+            dry_run,
+        } => {
             let mut total_freed = 0u64;
             for path_str in &paths {
                 let path = PathBuf::from(path_str);
@@ -256,17 +257,27 @@ async fn handle_command(
                 })
                 .await;
 
-                // Use size from the Delete command, fall back to known_sizes from scan
-                let size_hint = sizes.get(path_str).copied()
+                let size_hint = sizes
+                    .get(path_str)
+                    .copied()
                     .or_else(|| known_sizes.lock().unwrap().get(path_str).copied())
                     .unwrap_or(0);
 
-                let result = if size_hint > 0 {
-                    // Use instant rename-based deletion with pre-known size
-                    deleter::delete_dir_instant(path, size_hint, dry_run).await
-                } else {
-                    // Fallback: direct deletion (computes size during delete)
-                    deleter::delete_dir(path, dry_run).await
+                let result = {
+                    let p = path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if size_hint > 0 {
+                            deleter::delete_dir_instant(p, size_hint, dry_run)
+                        } else {
+                            deleter::delete_dir(p, dry_run)
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|e| deleter::DeleteResult::Error {
+                        path,
+                        message: format!("Task failed: {e}"),
+                        freed_bytes: 0,
+                    })
                 };
 
                 match &result {
@@ -279,11 +290,16 @@ async fn handle_command(
                         })
                         .await;
                     }
-                    deleter::DeleteResult::Error { path, message } => {
+                    deleter::DeleteResult::Error {
+                        path,
+                        message,
+                        freed_bytes,
+                    } => {
+                        total_freed += freed_bytes;
                         emit(&IpcEvent::DeleteProgress {
                             path: path.to_string_lossy().to_string(),
                             status: format!("error: {message}"),
-                            freed_bytes: 0,
+                            freed_bytes: *freed_bytes,
                         })
                         .await;
                     }
@@ -305,11 +321,20 @@ async fn handle_command(
                 .await;
 
                 let size_hint = sizes_map.get(&path_str).copied().unwrap_or(0);
-                let result = if size_hint > 0 {
-                    deleter::delete_dir_instant(path.clone(), size_hint, dry_run).await
-                } else {
-                    deleter::delete_dir(path.clone(), dry_run).await
-                };
+                let p = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    if size_hint > 0 {
+                        deleter::delete_dir_instant(p, size_hint, dry_run)
+                    } else {
+                        deleter::delete_dir(p, dry_run)
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| deleter::DeleteResult::Error {
+                    path: path.clone(),
+                    message: format!("Task failed: {e}"),
+                    freed_bytes: 0,
+                });
 
                 match &result {
                     deleter::DeleteResult::Success { path, freed_bytes } => {
@@ -321,11 +346,16 @@ async fn handle_command(
                         })
                         .await;
                     }
-                    deleter::DeleteResult::Error { path, message } => {
+                    deleter::DeleteResult::Error {
+                        path,
+                        message,
+                        freed_bytes,
+                    } => {
+                        total_freed += freed_bytes;
                         emit(&IpcEvent::DeleteProgress {
                             path: path.to_string_lossy().to_string(),
                             status: format!("error: {message}"),
-                            freed_bytes: 0,
+                            freed_bytes: *freed_bytes,
                         })
                         .await;
                     }
