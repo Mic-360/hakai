@@ -8,8 +8,12 @@ description = "The strongest filesystem engine for hakai — \"Throughout the fi
 name = "hakai"
 path = "src/main.rs"
 
+[features]
+default = []
+ipc = ["dep:tokio"]
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full"], optional = true }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
