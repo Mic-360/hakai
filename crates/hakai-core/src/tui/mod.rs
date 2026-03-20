@@ -374,20 +374,19 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
 
         if let Some(ref trash_path) = deleter::trash_path_for(&path) {
             if std::fs::rename(&path, trash_path).is_ok() {
-                let result = deleter::fast_remove_dir_all_no_count(trash_path);
-                match result {
-                    Ok(()) => {
+                match deleter::fast_remove_dir_all(trash_path) {
+                    Ok(freed) => {
                         tx.send(AppEvent::DeleteResult {
                             path,
-                            freed_bytes: known_size,
+                            freed_bytes: freed,
                             error: None,
                         })
                         .ok();
                     }
-                    Err(e) => {
+                    Err((freed, e)) => {
                         tx.send(AppEvent::DeleteResult {
                             path,
-                            freed_bytes: 0,
+                            freed_bytes: freed,
                             error: Some(e.to_string()),
                         })
                         .ok();
@@ -406,10 +405,10 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
                 })
                 .ok();
             }
-            Err(e) => {
+            Err((freed, e)) => {
                 tx.send(AppEvent::DeleteResult {
                     path,
-                    freed_bytes: 0,
+                    freed_bytes: freed,
                     error: Some(e.to_string()),
                 })
                 .ok();
@@ -417,8 +416,6 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
         }
     });
 }
-
-// ── Open directory ───────────────────────────────────────────────
 
 fn open_directory(app: &App) {
     let result = match app.get_selected_result() {
