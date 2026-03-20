@@ -31,15 +31,14 @@ chmod +x install.sh
 
 ## Build from Source
 
-Building from source gives you the latest version and works on any platform that Rust and Bun support.
-
 ### Prerequisites
 
 | Tool     | Version | Install                             |
 | -------- | ------- | ----------------------------------- |
 | **Rust** | 1.70+   | [rustup.rs](https://rustup.rs/)     |
-| **Bun**  | 1.0+    | [bun.sh](https://bun.sh/)           |
 | **Git**  | any     | [git-scm.com](https://git-scm.com/) |
+
+No other runtime or toolchain is required. Hakai is a pure Rust project.
 
 ### Step 1: Clone
 
@@ -56,18 +55,10 @@ cd hakai
 make build
 ```
 
-This builds the Rust binary in release mode and installs TUI dependencies.
-
 **Manual build:**
 
 ```bash
-# Build Rust core (release mode)
 cargo build --release
-
-# Install Bun TUI dependencies
-cd packages/hakai-tui
-bun install
-cd ../..
 ```
 
 The binary will be at `target/release/hakai` (or `target/release/hakai.exe` on Windows).
@@ -85,7 +76,6 @@ make install
 Windows (PowerShell):
 
 ```powershell
-# Create directory and copy binary
 New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\hakai\bin"
 Copy-Item "target\release\hakai.exe" "$env:LOCALAPPDATA\hakai\bin\hakai.exe"
 
@@ -111,44 +101,20 @@ hakai --version
 
 ---
 
-## Headless Mode (No Bun Required)
-
-If you only need the CLI without the interactive TUI, you can skip installing Bun entirely. The headless flags work with just the Rust binary:
-
-```bash
-# Build only the Rust binary
-cargo build --release
-
-# Use headless mode
-hakai --json -d ~/projects
-hakai --json-stream -d ~/projects
-hakai --delete-all -d ~/projects
-```
-
-These modes output JSON to stdout and don't require the TUI at all.
-
----
-
 ## Makefile Targets
 
-| Target         | Description                      |
-| -------------- | -------------------------------- |
-| `make build`   | Build both Rust core and Bun TUI |
-| `make install` | Build and install to system PATH |
-| `make clean`   | Remove build artifacts           |
-| `make test`    | Run all Rust tests               |
+| Target           | Description                           |
+| ---------------- | ------------------------------------- |
+| `make build`     | Build the Rust binary in release mode |
+| `make install`   | Build and install to system PATH      |
+| `make test`      | Run all tests                         |
+| `make clean`     | Remove build artifacts                |
 
 ---
 
 ## Configuration
 
-After installing, you can optionally create a config file:
-
-**Per-project config:**
-
-```bash
-cp .hakairc.example .hakairc
-```
+After installing, you can optionally create a configuration file:
 
 **Global config:**
 
@@ -158,6 +124,12 @@ cp .hakairc.example ~/.hakairc
 
 # Windows
 copy .hakairc.example %USERPROFILE%\.hakairc
+```
+
+**Per-project config:**
+
+```bash
+cp .hakairc.example .hakairc
 ```
 
 See [.hakairc.example](.hakairc.example) for all available options.
@@ -197,31 +169,23 @@ rm -rf ~/.hakai
 
 ### "command not found: hakai"
 
-The binary isn't in your PATH. Either:
+The binary is not in your PATH. Either:
 
 - Run `make install` to install it
 - Add `target/release/` to your PATH manually
 - Use the full path: `./target/release/hakai`
 
-### "TUI not found" / hakai runs in headless mode unexpectedly
-
-The Bun TUI binary can't be found. Make sure:
-
-1. Bun is installed (`bun --version`)
-2. TUI dependencies are installed (`cd packages/hakai-tui && bun install`)
-3. The `hakai-tui` directory is in the expected location relative to the binary
-
 ### Permission denied on deletion (Linux/macOS)
 
-Some directories may have restricted permissions. hakai attempts to fix permissions before deletion, but if you're cleaning directories created by other users:
+Some directories may have restricted permissions. Hakai clears permissions before deletion when possible, but directories created by other users may require elevated privileges:
 
 ```bash
 sudo hakai --delete-all -d /path/to/dir
 ```
 
-### Slow scanning on Windows network drives
+### Slow scanning on network drives
 
-Network drives have high latency per filesystem call. Use exclusions to skip known irrelevant subtrees:
+Network drives have high latency per filesystem call. Use exclusions to skip irrelevant subtrees:
 
 ```bash
 hakai -d Z:\projects --exclude vendor,dist
@@ -229,7 +193,7 @@ hakai -d Z:\projects --exclude vendor,dist
 
 ### "Access is denied" on Windows
 
-Some `node_modules` directories contain read-only files (e.g., from npm). hakai clears read-only attributes automatically, but if it still fails, try running from an elevated terminal (Administrator).
+Some `node_modules` directories contain read-only files (common with npm). Hakai clears read-only attributes automatically, but if deletion still fails, try running from an elevated terminal (Run as Administrator).
 
 ### Build fails with "linker not found"
 
@@ -248,10 +212,4 @@ sudo pacman -S base-devel
 
 ### Build fails with Windows crate errors on Linux/macOS
 
-This is expected — the `windows` crate dependency is conditionally compiled. Make sure you're building with:
-
-```bash
-cargo build --release
-```
-
-The `Cargo.toml` uses `[target.'cfg(windows)'.dependencies]` to only include the Windows crate on Windows builds.
+This is expected. The `windows` crate is conditionally compiled and only included on Windows builds. Standard `cargo build --release` handles this automatically via `[target.'cfg(windows)'.dependencies]` in `Cargo.toml`.
