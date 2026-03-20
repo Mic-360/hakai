@@ -58,7 +58,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_results(frame, app, chunks[3]);
     draw_status_bar(frame, app, chunks[4]);
 
-    // Overlays
     if app.show_errors && !app.errors.is_empty() {
         draw_error_popup(frame, app, area);
     }
@@ -67,6 +66,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.mode == AppMode::Search {
         draw_search_bar(frame, app, area);
+    }
+    if app.mode == AppMode::Preview {
+        draw_preview_popup(frame, app, area);
     }
 }
 
@@ -78,7 +80,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" v1.0.0", theme::dim()),
         Span::raw("  "),
         Span::styled(
-            format!("Sort: {} \u{25bc}", app.sort_mode.label()),
+            format!(
+                "Sort: {} {}",
+                app.sort_mode.label(),
+                match app.sort_mode {
+                    super::app::SortMode::Path => "\u{25b2}",
+                    _ => "\u{25bc}",
+                }
+            ),
             theme::dim(),
         ),
     ]);
@@ -126,10 +135,15 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     ]);
 
     if app.freed_space > 0 {
+        let freed_style = if app.is_freed_flashing() {
+            theme::flash_success()
+        } else {
+            theme::success()
+        };
         spans.extend_from_slice(&[
             Span::styled("  \u{00b7}  ", theme::dim()),
             Span::styled("Freed: ", theme::dim()),
-            Span::styled(format_size(app.freed_space), theme::success()),
+            Span::styled(format_size(app.freed_space), freed_style),
         ]);
     }
 
@@ -183,7 +197,8 @@ fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
         ]);
         frame.render_widget(Paragraph::new(line), area);
     } else {
-        let bar_width = area.width.saturating_sub(30) as usize;
+        let spin = spinner_char();
+        let bar_width = area.width.saturating_sub(50) as usize;
         let tick = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -194,21 +209,21 @@ fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
         let mut bar = String::with_capacity(bar_width);
         for i in 0..bar_width {
             if i < anim_pos.saturating_sub(2) {
-                bar.push('\u{2588}'); // █
+                bar.push('\u{2588}');
             } else if i < anim_pos {
-                bar.push('\u{2593}'); // ▓
+                bar.push('\u{2593}');
             } else {
-                bar.push('\u{2591}'); // ░
+                bar.push('\u{2591}');
             }
         }
 
         let line = Line::from(vec![
             Span::raw("  "),
-            Span::styled("Scanning... ", theme::highlight()),
+            Span::styled(format!("{spin} Scanning... "), theme::highlight()),
+            Span::styled(format!("Found: {} ", app.found_count()), theme::success()),
             Span::styled(bar, theme::dim()),
-            Span::raw(" "),
             Span::styled(
-                format!("{} dirs", app.dirs_scanned),
+                format!("  {} dirs scanned", app.dirs_scanned),
                 theme::dim(),
             ),
         ]);
@@ -237,6 +252,9 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let start = app.scroll_offset;
     let end = (start + visible_h).min(app.filtered_indices.len());
 
+    let max_size = app.max_result_size();
+    let search_query = &app.search_query;
+
     let items: Vec<ListItem> = (start..end)
         .map(|vi| {
             let idx = app.filtered_indices[vi];
@@ -245,12 +263,44 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             let is_checked = app.selected_paths.contains(&r.path);
             let is_pending = app.pending_delete.as_ref() == Some(&r.path);
 
-            build_result_line(r, is_selected, is_checked, app.mode, area.width, is_pending)
+            build_result_line(
+                r,
+                is_selected,
+                is_checked,
+                app.mode,
+                area.width,
+                is_pending,
+                max_size,
+                search_query,
+            )
         })
         .collect();
 
     let list = List::new(items);
     frame.render_widget(list, area);
+}
+
+fn size_bar(size: u64, max_size: u64, width: usize) -> String {
+    const BAR_CHARS: &[char] = &[' ', '\u{258f}', '\u{258e}', '\u{258d}', '\u{258c}', '\u{258b}', '\u{258a}', '\u{2589}', '\u{2588}'];
+    if max_size == 0 || size == 0 {
+        return " ".repeat(width);
+    }
+    let ratio = size as f64 / max_size as f64;
+    let filled = ratio * width as f64;
+    let full_blocks = filled as usize;
+    let remainder = ((filled - full_blocks as f64) * 8.0) as usize;
+
+    let mut bar = String::with_capacity(width);
+    for _ in 0..full_blocks.min(width) {
+        bar.push('\u{2588}');
+    }
+    if full_blocks < width && remainder > 0 {
+        bar.push(BAR_CHARS[remainder]);
+    }
+    while bar.chars().count() < width {
+        bar.push(' ');
+    }
+    bar
 }
 
 fn build_result_line(
@@ -260,6 +310,8 @@ fn build_result_line(
     mode: AppMode,
     width: u16,
     is_pending_delete: bool,
+    max_size: u64,
+    search_query: &str,
 ) -> ListItem<'static> {
     let prefix = match mode {
         AppMode::MultiSelect | AppMode::RangeSelect => {
@@ -278,7 +330,6 @@ fn build_result_line(
         }
     };
 
-    // Status indicators
     let (status_span, status_len) = if is_pending_delete {
         (Span::styled(" Delete? [y/Space]", Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)), 18)
     } else {
@@ -296,7 +347,6 @@ fn build_result_line(
         }
     };
 
-    // Risk indicator
     let (risk_span, risk_len) = if r.is_dead {
         (Span::styled(" \u{2620}", theme::warning()), 2)
     } else {
@@ -307,18 +357,20 @@ fn build_result_line(
         }
     };
 
-    // Size and age
     let size_str = if r.size_bytes > 0 {
         format_size(r.size_bytes)
     } else {
         "...".into()
     };
     let age_str = format_age(r.newest_ms);
-    let meta = format!("  {age_str:>10}  {size_str:>10}");
+    let bar = size_bar(r.size_bytes, max_size, 5);
+    let meta = format!("  {age_str:>10} {bar} {size_str:>10}");
     let meta_len = meta.len();
 
-    // Path — truncate to available width
-    let prefix_len = match mode {
+    let project_tag = r.project_name.as_deref().unwrap_or("");
+    let project_len = if project_tag.is_empty() { 0 } else { project_tag.len() + 3 };
+
+    let prefix_len: usize = match mode {
         AppMode::MultiSelect | AppMode::RangeSelect => 6,
         _ => 4,
     };
@@ -326,7 +378,8 @@ fn build_result_line(
         .saturating_sub(prefix_len)
         .saturating_sub(meta_len)
         .saturating_sub(status_len)
-        .saturating_sub(risk_len);
+        .saturating_sub(risk_len)
+        .saturating_sub(project_len);
     let path_str = r.path.to_string_lossy().to_string();
     let path_display = truncate_path(&path_str, avail);
 
@@ -337,11 +390,34 @@ fn build_result_line(
         _ => age_color(r.newest_ms),
     };
 
-    let mut spans = vec![
-        prefix,
-        Span::styled(path_display, path_style),
-        Span::styled(meta, theme::dim()),
-    ];
+    let mut spans = vec![prefix];
+
+    if !search_query.is_empty() && r.status != FolderStatus::Deleted {
+        let path_lower = path_display.to_lowercase();
+        let query_lower = search_query.to_lowercase();
+        if let Some(pos) = path_lower.find(&query_lower) {
+            let end = pos + search_query.len();
+            let before = &path_display[..pos];
+            let matched = &path_display[pos..end.min(path_display.len())];
+            let after = &path_display[end.min(path_display.len())..];
+            spans.push(Span::styled(before.to_string(), path_style));
+            spans.push(Span::styled(
+                matched.to_string(),
+                Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+            spans.push(Span::styled(after.to_string(), path_style));
+        } else {
+            spans.push(Span::styled(path_display, path_style));
+        }
+    } else {
+        spans.push(Span::styled(path_display, path_style));
+    }
+
+    if !project_tag.is_empty() {
+        spans.push(Span::styled(format!(" ({project_tag})"), theme::dim()));
+    }
+
+    spans.push(Span::styled(meta, theme::dim()));
 
     if risk_len > 0 {
         spans.push(risk_span);
@@ -408,25 +484,47 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("Esc", theme::highlight()),
             Span::raw(" cancel"),
         ]),
-        _ => Line::from(vec![
+        AppMode::Deleting => Line::from(vec![
             Span::raw("  "),
-            Span::styled("\u{2191}\u{2193}", theme::highlight()),
-            Span::raw(" Navigate  "),
-            Span::styled("Space", theme::highlight()),
-            Span::raw(" Delete  "),
-            Span::styled("T", theme::highlight()),
-            Span::raw(" Multi  "),
-            Span::styled("/", theme::highlight()),
-            Span::raw(" Search  "),
-            Span::styled("s", theme::highlight()),
-            Span::raw(" Sort  "),
-            Span::styled("o", theme::highlight()),
-            Span::raw(" Open  "),
-            Span::styled("?", theme::highlight()),
-            Span::raw(" Help  "),
-            Span::styled("q", theme::highlight()),
-            Span::raw(" Quit"),
+            Span::styled(format!("{} ", spinner_char()), theme::warning()),
+            Span::styled("Deleting... ", theme::warning()),
+            Span::raw("please wait"),
         ]),
+        AppMode::Preview => Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Esc", theme::highlight()),
+            Span::raw("/"),
+            Span::styled("p", theme::highlight()),
+            Span::raw(" Close preview"),
+        ]),
+        _ => {
+            let mut hint_spans = vec![
+                Span::raw("  "),
+                Span::styled("\u{2191}\u{2193}", theme::highlight()),
+                Span::raw(" Navigate  "),
+                Span::styled("Space", theme::highlight()),
+                Span::raw(" Delete  "),
+                Span::styled("T", theme::highlight()),
+                Span::raw(" Multi  "),
+                Span::styled("/", theme::highlight()),
+                Span::raw(" Search  "),
+                Span::styled("s", theme::highlight()),
+                Span::raw(" Sort  "),
+                Span::styled("p", theme::highlight()),
+                Span::raw(" Preview  "),
+                Span::styled("o", theme::highlight()),
+                Span::raw(" Open  "),
+            ];
+            if app.undo_count() > 0 {
+                hint_spans.push(Span::styled("u", theme::highlight()));
+                hint_spans.push(Span::raw(" Undo  "));
+            }
+            hint_spans.push(Span::styled("?", theme::highlight()));
+            hint_spans.push(Span::raw(" Help  "));
+            hint_spans.push(Span::styled("q", theme::highlight()));
+            hint_spans.push(Span::raw(" Quit"));
+            Line::from(hint_spans)
+        }
     };
 
     let para = Paragraph::new(vec![sep_line, hints]);
@@ -500,7 +598,70 @@ fn draw_error_popup(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, popup_area);
 }
 
-// ── Help popup ───────────────────────────────────────────────────
+fn draw_preview_popup(frame: &mut Frame, app: &App, area: Rect) {
+    let width = 74.min(area.width.saturating_sub(4));
+    let height = 20.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+
+    let popup_area = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup_area);
+
+    let selected = app.get_selected_result();
+    let title = if let Some(r) = selected {
+        format!(
+            " {} ",
+            r.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Preview")
+        )
+    } else {
+        " Preview ".to_string()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::highlight())
+        .title(Span::styled(title, theme::highlight()));
+
+    let inner_width = width.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line> = if app.preview_entries.is_empty() {
+        vec![Line::from(Span::styled(
+            format!("  {} Loading...", spinner_char()),
+            theme::dim(),
+        ))]
+    } else {
+        app.preview_entries
+            .iter()
+            .map(|(name, size)| {
+                let name_width = inner_width.saturating_sub(12);
+                let display_name = if name.len() > name_width {
+                    format!("{}...", &name[..name_width.saturating_sub(3)])
+                } else {
+                    name.clone()
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {display_name:<width$}", width = name_width),
+                        Style::default().fg(theme::WHITE),
+                    ),
+                    Span::styled(format!("{:>10}", format_size(*size)), theme::dim()),
+                ])
+            })
+            .collect()
+    };
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Press 'p' or Esc to close",
+        theme::dim(),
+    )));
+
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, popup_area);
+}
 
 fn draw_help_popup(frame: &mut Frame, area: Rect) {
     let width = 56.min(area.width.saturating_sub(4));
@@ -525,8 +686,10 @@ fn draw_help_popup(frame: &mut Frame, area: Rect) {
         ("A", "Select/deselect all (multi)"),
         ("V", "Toggle range select"),
         ("Enter", "Confirm multi-select delete"),
+        ("u", "Undo last delete (30s)"),
         ("/", "Open search filter"),
         ("s", "Cycle sort mode"),
+        ("p", "Preview directory contents"),
         ("o", "Open parent directory"),
         ("e", "Show/hide errors"),
         ("?", "Toggle this help"),

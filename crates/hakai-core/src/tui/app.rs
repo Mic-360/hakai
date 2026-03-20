@@ -11,6 +11,7 @@ pub enum AppMode {
     Search,
     Deleting,
     Help,
+    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,15 @@ pub struct FolderResult {
     pub risk_level: RiskLevel,
     pub status: FolderStatus,
     pub error_message: Option<String>,
+    pub project_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UndoEntry {
+    pub original_path: PathBuf,
+    pub trash_path: PathBuf,
+    pub size_bytes: u64,
+    pub expires_ms: u64,
 }
 
 pub struct App {
@@ -82,6 +92,9 @@ pub struct App {
     pub min_size: Option<u64>,
     pub list_height: usize,
     pub pending_delete: Option<PathBuf>,
+    pub preview_entries: Vec<(String, u64)>,
+    pub undo_stack: Vec<UndoEntry>,
+    pub freed_flash_until: u64,
     filter_dirty: bool,
     sort_dirty: bool,
 }
@@ -120,6 +133,9 @@ impl App {
             min_size,
             list_height: 10,
             pending_delete: None,
+            preview_entries: Vec::new(),
+            undo_stack: Vec::new(),
+            freed_flash_until: 0,
             filter_dirty: true,
             sort_dirty: false,
         }
@@ -137,6 +153,7 @@ impl App {
             risk_level: RiskLevel::Low,
             status: FolderStatus::Found,
             error_message: None,
+            project_name: None,
         });
         self.filter_dirty = true;
     }
@@ -454,6 +471,73 @@ impl App {
         self.results.len()
     }
 
+    pub fn max_result_size(&self) -> u64 {
+        self.results.iter().map(|r| r.size_bytes).max().unwrap_or(1)
+    }
+
+    pub fn update_project_name(&mut self, path: &PathBuf, name: Option<String>) {
+        if let Some(&idx) = self.result_map.get(path) {
+            self.results[idx].project_name = name;
+        }
+    }
+
+    pub fn push_undo(&mut self, original_path: PathBuf, trash_path: PathBuf, size_bytes: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.undo_stack.push(UndoEntry {
+            original_path,
+            trash_path,
+            size_bytes,
+            expires_ms: now_ms + 30_000,
+        });
+    }
+
+    pub fn flash_freed(&mut self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.freed_flash_until = now_ms + 2000;
+    }
+
+    pub fn is_freed_flashing(&self) -> bool {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now_ms < self.freed_flash_until
+    }
+
+    pub fn cleanup_expired_undo(&mut self) -> Vec<PathBuf> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut expired = Vec::new();
+        self.undo_stack.retain(|entry| {
+            if now_ms >= entry.expires_ms {
+                expired.push(entry.trash_path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        expired
+    }
+
+    pub fn undo_count(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn restore_from_undo(&mut self, original_path: &PathBuf, size_bytes: u64) {
+        if let Some(&idx) = self.result_map.get(original_path) {
+            self.results[idx].status = FolderStatus::Found;
+            self.freed_space = self.freed_space.saturating_sub(size_bytes);
+            self.filter_dirty = true;
+        }
+    }
 }
 
 

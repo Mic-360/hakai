@@ -31,9 +31,10 @@ enum AppEvent {
     ScanProgress { scanned: u64 },
     ScanError(String),
     ScanComplete { duration_ms: u64 },
-    SizeCalculated { path: PathBuf, size: u64, newest_ms: u64 },
+    SizeCalculated { path: PathBuf, size: u64, newest_ms: u64, project_name: Option<String> },
     RiskAnalyzed { path: PathBuf, is_dead: bool, risk_level: RiskLevel },
-    DeleteResult { path: PathBuf, freed_bytes: u64, error: Option<String> },
+    DeleteResult { path: PathBuf, freed_bytes: u64, error: Option<String>, trash_path: Option<PathBuf> },
+    PreviewReady { entries: Vec<(String, u64)> },
     PermissionDenied,
 }
 
@@ -160,6 +161,12 @@ fn run_event_loop(
         if app.should_quit {
             break;
         }
+
+        for trash_path in app.cleanup_expired_undo() {
+            std::thread::spawn(move || {
+                let _ = deleter::fast_remove_dir_all(&trash_path);
+            });
+        }
     }
 
     input_running.store(false, Ordering::Relaxed);
@@ -182,10 +189,12 @@ fn handle_event(
             let p = path.clone();
             rayon::spawn(move || {
                 let (size, newest) = sizer::calculate_size_and_mtime(&p);
+                let project_name = detect_project_name(&p);
                 tx.send(AppEvent::SizeCalculated {
                     path: p,
                     size,
                     newest_ms: newest,
+                    project_name,
                 })
                 .ok();
             });
@@ -224,8 +233,12 @@ fn handle_event(
             path,
             size,
             newest_ms,
+            project_name,
         } => {
             app.update_size(&path, size, newest_ms);
+            if project_name.is_some() {
+                app.update_project_name(&path, project_name);
+            }
         }
         AppEvent::RiskAnalyzed {
             path,
@@ -238,11 +251,16 @@ fn handle_event(
             path,
             freed_bytes,
             error,
+            trash_path,
         } => {
             if let Some(err) = error {
                 app.mark_error(&path, err);
             } else {
                 app.mark_deleted(&path, freed_bytes);
+                app.flash_freed();
+                if let Some(tp) = trash_path {
+                    app.push_undo(path.clone(), tp, freed_bytes);
+                }
             }
             let still_deleting = app
                 .results
@@ -251,6 +269,9 @@ fn handle_event(
             if !still_deleting && app.mode == AppMode::Deleting {
                 app.mode = AppMode::Normal;
             }
+        }
+        AppEvent::PreviewReady { entries } => {
+            app.preview_entries = entries;
         }
         AppEvent::PermissionDenied => {
             app.permission_denied_count += 1;
@@ -278,6 +299,16 @@ fn handle_key(
     if app.mode == AppMode::Help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                app.mode = AppMode::Normal;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if app.mode == AppMode::Preview {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q') => {
                 app.mode = AppMode::Normal;
             }
             _ => {}
@@ -337,6 +368,27 @@ fn handle_key(
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Char('e') => app.show_errors = !app.show_errors,
         KeyCode::Char('o') => open_directory(app),
+        KeyCode::Char('p') => {
+            if let Some(r) = app.get_selected_result() {
+                let path = r.path.clone();
+                app.mode = AppMode::Preview;
+                app.preview_entries.clear();
+                let tx = event_tx.clone();
+                std::thread::spawn(move || {
+                    let entries = collect_preview_entries(&path);
+                    tx.send(AppEvent::PreviewReady { entries }).ok();
+                });
+            }
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') => {
+            if let Some(entry) = app.undo_stack.pop() {
+                let original = entry.original_path.clone();
+                app.restore_from_undo(&original, entry.size_bytes);
+                std::thread::spawn(move || {
+                    let _ = std::fs::rename(&entry.trash_path, &entry.original_path);
+                });
+            }
+        }
         KeyCode::Char('?') => app.mode = AppMode::Help,
         KeyCode::Esc => app.handle_escape(),
         _ => {}
@@ -367,31 +419,21 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
                 path,
                 freed_bytes: known_size,
                 error: None,
+                trash_path: None,
             })
             .ok();
             return;
         }
 
-        if let Some(ref trash_path) = deleter::trash_path_for(&path) {
-            if std::fs::rename(&path, trash_path).is_ok() {
-                match deleter::fast_remove_dir_all(trash_path) {
-                    Ok(freed) => {
-                        tx.send(AppEvent::DeleteResult {
-                            path,
-                            freed_bytes: freed,
-                            error: None,
-                        })
-                        .ok();
-                    }
-                    Err((freed, e)) => {
-                        tx.send(AppEvent::DeleteResult {
-                            path,
-                            freed_bytes: freed,
-                            error: Some(e.to_string()),
-                        })
-                        .ok();
-                    }
-                }
+        if let Some(trash) = deleter::trash_path_for(&path) {
+            if std::fs::rename(&path, &trash).is_ok() {
+                tx.send(AppEvent::DeleteResult {
+                    path,
+                    freed_bytes: known_size,
+                    error: None,
+                    trash_path: Some(trash),
+                })
+                .ok();
                 return;
             }
         }
@@ -402,6 +444,7 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
                     path,
                     freed_bytes: freed,
                     error: None,
+                    trash_path: None,
                 })
                 .ok();
             }
@@ -410,11 +453,79 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
                     path,
                     freed_bytes: freed,
                     error: Some(e.to_string()),
+                    trash_path: None,
                 })
                 .ok();
             }
         }
     });
+}
+
+fn detect_project_name(target_path: &std::path::Path) -> Option<String> {
+    let parent = target_path.parent()?;
+    let markers = [
+        "package.json",
+        "Cargo.toml",
+        "pubspec.yaml",
+        "build.gradle",
+        "pom.xml",
+        "pyproject.toml",
+        "go.mod",
+    ];
+    for marker in &markers {
+        if parent.join(marker).exists() {
+            return parent.file_name()?.to_str().map(|s| s.to_string());
+        }
+    }
+    let grandparent = parent.parent()?;
+    for marker in &markers {
+        if grandparent.join(marker).exists() {
+            return Some(format!(
+                "{}/{}",
+                grandparent.file_name()?.to_str()?,
+                parent.file_name()?.to_str()?
+            ));
+        }
+    }
+    None
+}
+
+fn collect_preview_entries(root: &std::path::Path) -> Vec<(String, u64)> {
+    let mut entries = Vec::new();
+
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        depth: usize,
+        entries: &mut Vec<(String, u64)>,
+    ) {
+        if depth > 2 {
+            return;
+        }
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let name = rel.to_string_lossy().to_string();
+            if meta.is_file() {
+                entries.push((name, meta.len()));
+            } else if meta.is_dir() && depth < 2 {
+                walk(&path, root, depth + 1, entries);
+            }
+        }
+    }
+
+    walk(root, root, 0, &mut entries);
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.truncate(15);
+    entries
 }
 
 fn open_directory(app: &App) {

@@ -46,3 +46,9 @@ pub fn error() -> Style {
 pub fn warning() -> Style {
     Style::default().fg(YELLOW)
 }
+
+pub fn flash_success() -> Style {
+    Style::default()
+        .fg(GREEN)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+}
