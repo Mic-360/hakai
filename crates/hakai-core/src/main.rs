@@ -1,11 +1,13 @@
 mod config;
 mod deleter;
+#[cfg(feature = "ipc")]
 mod ipc;
 pub mod platform;
 mod risk;
 mod scanner;
 mod sizer;
 mod tui;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -84,7 +86,6 @@ struct Args {
     #[arg(long = "no-parallel")]
     no_parallel: bool,
 
-    /// Run in IPC server mode (used by hakai-tui)
     #[arg(long = "ipc", hide = true)]
     ipc: bool,
 
@@ -145,7 +146,6 @@ fn main() {
     let args = Args::parse();
     let cfg = config::load_config();
 
-    // Configure thread pool
     if let Some(threads) = args.threads {
         if threads > 0 {
             rayon::ThreadPoolBuilder::new()
@@ -161,13 +161,19 @@ fn main() {
     }
 
     if args.ipc {
-        // IPC server mode — communicate with Bun TUI via stdin/stdout JSON
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(ipc::run_ipc_server(&cfg));
-        return;
+        #[cfg(feature = "ipc")]
+        {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(ipc::run_ipc_server(&cfg));
+            return;
+        }
+        #[cfg(not(feature = "ipc"))]
+        {
+            eprintln!("IPC mode requires the 'ipc' feature. Build with: cargo build --features ipc");
+            return;
+        }
     }
 
-    // Determine targets
     let targets = if let Some(profile_name) = &args.profile {
         let builtins = config::builtin_profiles();
         let all_profiles = cfg.profiles.iter().chain(builtins.iter());
@@ -188,7 +194,6 @@ fn main() {
         vec!["node_modules".into()]
     };
 
-    // Determine root directory
     let root = if args.full {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
     } else if let Some(ref d) = args.directory {
@@ -209,10 +214,8 @@ fn main() {
     };
 
     if args.json || args.json_stream || args.delete_all {
-        // Headless mode
         run_headless(args, scan_opts, &targets);
     } else {
-        // Interactive TUI mode (built-in ratatui)
         let sort_mode = match args.sort.as_deref().unwrap_or(&cfg.settings.default_sort) {
             "size" => tui::app::SortMode::Size,
             "last-mod" => tui::app::SortMode::LastMod,
@@ -249,39 +252,30 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
         scanner::scan_parallel(&opts_clone, &tx, cancel);
     });
 
-    let mut results: Vec<JsonResult> = Vec::new();
-    let mut total_size = 0u64;
+    let (result_tx, result_rx) = crossbeam_channel::unbounded::<JsonResult>();
     let mut duration_ms = 0u64;
 
     for event in rx {
         match event {
             scanner::ScanEvent::Found { path } => {
-                let size = sizer::calculate_size(&path);
-                let newest = sizer::get_newest_file_time(&path).unwrap_or(0);
+                let tx = result_tx.clone();
+                rayon::spawn(move || {
+                    let (size, newest) = sizer::calculate_size_and_mtime(&path);
+                    let target_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    let risk_result = risk::analyze_risk(&path, target_name);
 
-                let target_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-                let risk_result = risk::analyze_risk(&path, target_name);
-
-                total_size += size;
-
-                let jr = JsonResult {
-                    path: path.to_string_lossy().to_string(),
-                    size,
-                    modification_time: newest,
-                    is_dead: risk_result.is_dead,
-                    risk_level: format!("{:?}", risk_result.risk_level).to_lowercase(),
-                };
-
-                if args.json_stream {
-                    if let Ok(json) = serde_json::to_string(&jr) {
-                        println!("{json}");
-                    }
-                }
-
-                results.push(jr);
+                    let jr = JsonResult {
+                        path: path.to_string_lossy().to_string(),
+                        size,
+                        modification_time: newest,
+                        is_dead: risk_result.is_dead,
+                        risk_level: format!("{:?}", risk_result.risk_level).to_lowercase(),
+                    };
+                    let _ = tx.send(jr);
+                });
             }
             scanner::ScanEvent::Complete {
                 total_found: _,
@@ -298,12 +292,21 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             scanner::ScanEvent::Progress { .. } => {}
         }
     }
+    drop(result_tx);
 
-    // Sort results
-    let sort_mode = args
-        .sort
-        .as_deref()
-        .unwrap_or(&"path");
+    let mut results: Vec<JsonResult> = Vec::new();
+    let mut total_size = 0u64;
+    for jr in result_rx {
+        total_size += jr.size;
+        if args.json_stream {
+            if let Ok(json) = serde_json::to_string(&jr) {
+                println!("{json}");
+            }
+        }
+        results.push(jr);
+    }
+
+    let sort_mode = args.sort.as_deref().unwrap_or("path");
     match sort_mode {
         "size" => results.sort_by(|a, b| b.size.cmp(&a.size)),
         "last-mod" => results.sort_by(|a, b| b.modification_time.cmp(&a.modification_time)),
@@ -324,7 +327,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             summary: JsonSummary {
                 total_found,
                 total_size_bytes: total_size,
-                total_size_human: format_human_size(total_size),
+                total_size_human: util::format_size(total_size),
             },
         };
         if let Ok(json) = serde_json::to_string_pretty(&output) {
@@ -336,7 +339,7 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             return;
         }
 
-        let total_display = format_human_size(total_size);
+        let total_display = util::format_size(total_size);
         if !args.yes {
             eprintln!(
                 "🔵 Red, 🔴 Blue... 🟣 Hollow Purple! Prepare to delete {} directories ({}). Continue? [y/N] ",
@@ -351,38 +354,25 @@ fn run_headless(args: Args, scan_opts: ScanOptions, targets: &[String]) {
             }
         }
 
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         let items: Vec<(PathBuf, u64)> = results
             .iter()
             .map(|r| (PathBuf::from(&r.path), r.size))
             .collect();
-        let delete_results = rt.block_on(deleter::delete_batch_with_sizes(items, args.dry_run, 8));
+        let delete_results = deleter::delete_batch(items, args.dry_run);
 
         let mut total_freed = 0u64;
         for result in &delete_results {
             match result {
                 deleter::DeleteResult::Success { path, freed_bytes } => {
                     total_freed += freed_bytes;
-                    eprintln!("✓ Deleted: {} ({})", path.display(), format_human_size(*freed_bytes));
+                    eprintln!("✓ Deleted: {} ({})", path.display(), util::format_size(*freed_bytes));
                 }
-                deleter::DeleteResult::Error { path, message } => {
+                deleter::DeleteResult::Error { path, message, freed_bytes } => {
+                    total_freed += freed_bytes;
                     eprintln!("✗ Error: {} — {}", path.display(), message);
                 }
             }
         }
-        eprintln!("\n🦀 Freed: {}. Domain Expansion: Infinite Free Space!", format_human_size(total_freed));
+        eprintln!("\n🦀 Freed: {}. Domain Expansion: Infinite Free Space!", util::format_size(total_freed));
     }
 }
-
-fn format_human_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
-

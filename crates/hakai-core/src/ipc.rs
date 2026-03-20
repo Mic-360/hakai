@@ -12,8 +12,6 @@ use crate::risk;
 use crate::scanner::{self, ScanEvent, ScanOptions};
 use crate::sizer;
 
-// ── Commands Rust receives FROM Bun ──────────────────────────────
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd")]
 pub enum IpcCommand {
@@ -42,8 +40,6 @@ pub enum IpcCommand {
         target: String,
     },
 }
-
-// ── Events Rust sends TO Bun ─────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "event")]
@@ -86,7 +82,6 @@ pub enum IpcEvent {
     },
 }
 
-/// Write a single IPC event as a JSON line to stdout.
 async fn emit(event: &IpcEvent) {
     let mut stdout = tokio::io::stdout();
     if let Ok(json) = serde_json::to_string(event) {
@@ -96,21 +91,21 @@ async fn emit(event: &IpcEvent) {
     }
 }
 
-/// Emit an event synchronously (for use from non-async contexts like scanner threads).
 fn emit_sync(event: &IpcEvent) {
     if let Ok(json) = serde_json::to_string(event) {
         let line = format!("{json}\n");
-        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut stdout = std::io::stdout().lock();
+        let _ = std::io::Write::write_all(&mut stdout, line.as_bytes());
+        let _ = std::io::Write::flush(&mut stdout);
     }
 }
 
-/// Run the IPC server loop — reads JSON commands from stdin, dispatches actions.
 pub async fn run_ipc_server(_config: &HakaiConfig) {
     emit(&IpcEvent::Ready {
         version: "1.0.0".into(),
         protocol: 1,
-    }).await;
+    })
+    .await;
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -168,13 +163,11 @@ async fn handle_command(
             let (tx, rx) = crossbeam_channel::unbounded();
             let cancel = cancel_flag.clone();
 
-            // Spawn scanner on a blocking thread pool
             let scan_opts = opts.clone();
             tokio::task::spawn_blocking(move || {
                 scanner::scan_parallel(&scan_opts, &tx, cancel);
             });
 
-            // Forward scan events as IPC events
             while let Ok(event) = rx.recv() {
                 match event {
                     ScanEvent::Found { path } => {
@@ -182,12 +175,10 @@ async fn handle_command(
                         found_paths.push(path.clone());
                         emit(&IpcEvent::ScanFound { path: path_str }).await;
 
-                        // Concurrently calculate size and track it
                         let p = path.clone();
                         let sizes = known_sizes.clone();
                         tokio::task::spawn_blocking(move || {
-                            let size = sizer::calculate_size(&p);
-                            let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+                            let (size, newest) = sizer::calculate_size_and_mtime(&p);
                             let path_str = p.to_string_lossy().to_string();
                             sizes.lock().unwrap().insert(path_str.clone(), size);
                             emit_sync(&IpcEvent::ScanSize {
@@ -231,8 +222,7 @@ async fn handle_command(
 
         IpcCommand::GetSize { path } => {
             let p = PathBuf::from(&path);
-            let size = sizer::calculate_size(&p);
-            let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+            let (size, newest) = sizer::calculate_size_and_mtime(&p);
             emit(&IpcEvent::ScanSize {
                 path,
                 size_bytes: size,
@@ -252,7 +242,11 @@ async fn handle_command(
             .await;
         }
 
-        IpcCommand::Delete { paths, sizes, dry_run } => {
+        IpcCommand::Delete {
+            paths,
+            sizes,
+            dry_run,
+        } => {
             let mut total_freed = 0u64;
             for path_str in &paths {
                 let path = PathBuf::from(path_str);
@@ -263,17 +257,27 @@ async fn handle_command(
                 })
                 .await;
 
-                // Use size from the Delete command, fall back to known_sizes from scan
-                let size_hint = sizes.get(path_str).copied()
+                let size_hint = sizes
+                    .get(path_str)
+                    .copied()
                     .or_else(|| known_sizes.lock().unwrap().get(path_str).copied())
                     .unwrap_or(0);
 
-                let result = if size_hint > 0 {
-                    // Use instant rename-based deletion with pre-known size
-                    deleter::delete_dir_instant(path, size_hint, dry_run).await
-                } else {
-                    // Fallback: direct deletion (computes size during delete)
-                    deleter::delete_dir(path, dry_run).await
+                let result = {
+                    let p = path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if size_hint > 0 {
+                            deleter::delete_dir_instant(p, size_hint, dry_run)
+                        } else {
+                            deleter::delete_dir(p, dry_run)
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|e| deleter::DeleteResult::Error {
+                        path,
+                        message: format!("Task failed: {e}"),
+                        freed_bytes: 0,
+                    })
                 };
 
                 match &result {
@@ -286,11 +290,16 @@ async fn handle_command(
                         })
                         .await;
                     }
-                    deleter::DeleteResult::Error { path, message } => {
+                    deleter::DeleteResult::Error {
+                        path,
+                        message,
+                        freed_bytes,
+                    } => {
+                        total_freed += freed_bytes;
                         emit(&IpcEvent::DeleteProgress {
                             path: path.to_string_lossy().to_string(),
                             status: format!("error: {message}"),
-                            freed_bytes: 0,
+                            freed_bytes: *freed_bytes,
                         })
                         .await;
                     }
@@ -312,11 +321,20 @@ async fn handle_command(
                 .await;
 
                 let size_hint = sizes_map.get(&path_str).copied().unwrap_or(0);
-                let result = if size_hint > 0 {
-                    deleter::delete_dir_instant(path.clone(), size_hint, dry_run).await
-                } else {
-                    deleter::delete_dir(path.clone(), dry_run).await
-                };
+                let p = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    if size_hint > 0 {
+                        deleter::delete_dir_instant(p, size_hint, dry_run)
+                    } else {
+                        deleter::delete_dir(p, dry_run)
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| deleter::DeleteResult::Error {
+                    path: path.clone(),
+                    message: format!("Task failed: {e}"),
+                    freed_bytes: 0,
+                });
 
                 match &result {
                     deleter::DeleteResult::Success { path, freed_bytes } => {
@@ -328,11 +346,16 @@ async fn handle_command(
                         })
                         .await;
                     }
-                    deleter::DeleteResult::Error { path, message } => {
+                    deleter::DeleteResult::Error {
+                        path,
+                        message,
+                        freed_bytes,
+                    } => {
+                        total_freed += freed_bytes;
                         emit(&IpcEvent::DeleteProgress {
                             path: path.to_string_lossy().to_string(),
                             status: format!("error: {message}"),
-                            freed_bytes: 0,
+                            freed_bytes: *freed_bytes,
                         })
                         .await;
                     }

@@ -3,8 +3,6 @@ use std::path::PathBuf;
 
 use crate::risk::RiskLevel;
 
-// ── Enums ────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Normal,
@@ -48,8 +46,6 @@ pub enum FolderStatus {
     Error,
 }
 
-// ── Data ─────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct FolderResult {
     pub path: PathBuf,
@@ -60,8 +56,6 @@ pub struct FolderResult {
     pub status: FolderStatus,
     pub error_message: Option<String>,
 }
-
-// ── App State ────────────────────────────────────────────────────
 
 pub struct App {
     pub mode: AppMode,
@@ -131,7 +125,6 @@ impl App {
         }
     }
 
-    // ── Result management ────────────────────────────────────────
 
     pub fn add_result(&mut self, path: PathBuf) {
         let idx = self.results.len();
@@ -182,7 +175,6 @@ impl App {
         }
     }
 
-    // ── Filtering & sorting ──────────────────────────────────────
 
     pub fn rebuild_filter_if_dirty(&mut self) {
         if !self.filter_dirty {
@@ -197,7 +189,6 @@ impl App {
                 SortMode::LastMod => self.results.sort_by(|a, b| b.newest_ms.cmp(&a.newest_ms)),
                 SortMode::Path => self.results.sort_by(|a, b| a.path.cmp(&b.path)),
             }
-            // Rebuild the index map after sorting
             self.result_map.clear();
             for (i, r) in self.results.iter().enumerate() {
                 self.result_map.insert(r.path.clone(), i);
@@ -223,7 +214,6 @@ impl App {
             self.filtered_indices.push(i);
         }
 
-        // Clamp selection
         if self.filtered_indices.is_empty() {
             self.selected_index = 0;
         } else if self.selected_index >= self.filtered_indices.len() {
@@ -238,7 +228,6 @@ impl App {
         self.filter_dirty = true;
     }
 
-    // ── Navigation ───────────────────────────────────────────────
 
     pub fn move_selection(&mut self, delta: i32) {
         self.pending_delete = None;
@@ -285,7 +274,6 @@ impl App {
         }
     }
 
-    // ── Selection & deletion ─────────────────────────────────────
 
     pub fn handle_space_or_delete(&mut self) -> Option<(PathBuf, u64)> {
         if self.filtered_indices.is_empty() {
@@ -293,7 +281,6 @@ impl App {
         }
 
         if self.mode == AppMode::MultiSelect || self.mode == AppMode::RangeSelect {
-            // Toggle selection (no confirmation needed)
             let idx = self.filtered_indices[self.selected_index];
             let path = self.results[idx].path.clone();
             if self.selected_paths.contains(&path) {
@@ -303,14 +290,12 @@ impl App {
             }
             None
         } else {
-            // Single delete — require confirmation
             let idx = self.filtered_indices[self.selected_index];
             let r = &self.results[idx];
             if r.status != FolderStatus::Found {
                 return None;
             }
             let path = r.path.clone();
-            // Set pending — caller checks pending_delete and routes 'y'/Space to confirm
             self.pending_delete = Some(path);
             None
         }
@@ -417,7 +402,6 @@ impl App {
         }
     }
 
-    // ── Search ───────────────────────────────────────────────────
 
     pub fn enter_search(&mut self) {
         self.mode = AppMode::Search;
@@ -441,7 +425,6 @@ impl App {
         self.filter_dirty = true;
     }
 
-    // ── Escape ───────────────────────────────────────────────────
 
     pub fn handle_escape(&mut self) {
         match self.mode {
@@ -456,7 +439,6 @@ impl App {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────
 
     pub fn get_selected_result(&self) -> Option<&FolderResult> {
         self.filtered_indices
@@ -474,19 +456,6 @@ impl App {
 
 }
 
-// ── Formatting helpers ───────────────────────────────────────────
-
-pub fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
 
 pub fn format_age(newest_ms: u64) -> String {
     if newest_ms == 0 {

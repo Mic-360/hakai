@@ -24,8 +24,6 @@ use crate::{deleter, risk, scanner, sizer};
 
 use app::{App, AppMode, SortMode};
 
-// ── Unified event channel ────────────────────────────────────────
-
 enum AppEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
@@ -62,7 +60,6 @@ pub fn run_tui(
 
     let result = run_event_loop(&mut terminal, &mut app, scan_opts);
 
-    // Restore terminal
     terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
@@ -82,7 +79,6 @@ fn run_event_loop(
     let (event_tx, event_rx): (Sender<AppEvent>, Receiver<AppEvent>) =
         crossbeam_channel::unbounded();
 
-    // Input polling thread
     let input_tx = event_tx.clone();
     let input_running = Arc::new(AtomicBool::new(true));
     let input_flag = input_running.clone();
@@ -104,7 +100,6 @@ fn run_event_loop(
         }
     });
 
-    // Scanner thread
     let scanner_tx = event_tx.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
@@ -144,7 +139,6 @@ fn run_event_loop(
         }
     });
 
-    // Main loop
     loop {
         app.rebuild_filter_if_dirty();
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -174,8 +168,6 @@ fn run_event_loop(
     Ok(())
 }
 
-// ── Event handling ───────────────────────────────────────────────
-
 fn handle_event(
     app: &mut App,
     event_tx: &Sender<AppEvent>,
@@ -189,8 +181,7 @@ fn handle_event(
             let tx = event_tx.clone();
             let p = path.clone();
             rayon::spawn(move || {
-                let size = sizer::calculate_size(&p);
-                let newest = sizer::get_newest_file_time(&p).unwrap_or(0);
+                let (size, newest) = sizer::calculate_size_and_mtime(&p);
                 tx.send(AppEvent::SizeCalculated {
                     path: p,
                     size,
@@ -273,7 +264,6 @@ fn handle_key(
     key: KeyEvent,
     _cancel: &Arc<AtomicBool>,
 ) {
-    // Search mode
     if app.mode == AppMode::Search {
         match key.code {
             KeyCode::Esc => app.handle_escape(),
@@ -285,7 +275,6 @@ fn handle_key(
         return;
     }
 
-    // Help mode
     if app.mode == AppMode::Help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
@@ -296,7 +285,6 @@ fn handle_key(
         return;
     }
 
-    // Error popup
     if app.show_errors {
         if key.code == KeyCode::Char('e') || key.code == KeyCode::Esc {
             app.show_errors = false;
@@ -304,13 +292,11 @@ fn handle_key(
         return;
     }
 
-    // Ctrl+C always quits
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
         return;
     }
 
-    // 'y' confirms pending delete
     if app.pending_delete.is_some() {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char(' ') | KeyCode::Delete => {
@@ -362,7 +348,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         MouseEventKind::ScrollUp => app.move_selection(-3),
         MouseEventKind::ScrollDown => app.move_selection(3),
         MouseEventKind::Down(MouseButton::Left) => {
-            // Header(3) + stats(1) + progress(1) = 5 lines offset
             let header_height = 5u16;
             if mouse.row >= header_height {
                 let clicked = (mouse.row - header_height) as usize + app.scroll_offset;
@@ -374,8 +359,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         _ => {}
     }
 }
-
-// ── Deletion ─────────────────────────────────────────────────────
 
 fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: bool) {
     std::thread::spawn(move || {
@@ -391,20 +374,19 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
 
         if let Some(ref trash_path) = deleter::trash_path_for(&path) {
             if std::fs::rename(&path, trash_path).is_ok() {
-                let result = deleter::fast_remove_dir_all_no_count(trash_path);
-                match result {
-                    Ok(()) => {
+                match deleter::fast_remove_dir_all(trash_path) {
+                    Ok(freed) => {
                         tx.send(AppEvent::DeleteResult {
                             path,
-                            freed_bytes: known_size,
+                            freed_bytes: freed,
                             error: None,
                         })
                         .ok();
                     }
-                    Err(e) => {
+                    Err((freed, e)) => {
                         tx.send(AppEvent::DeleteResult {
                             path,
-                            freed_bytes: 0,
+                            freed_bytes: freed,
                             error: Some(e.to_string()),
                         })
                         .ok();
@@ -423,10 +405,10 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
                 })
                 .ok();
             }
-            Err(e) => {
+            Err((freed, e)) => {
                 tx.send(AppEvent::DeleteResult {
                     path,
-                    freed_bytes: 0,
+                    freed_bytes: freed,
                     error: Some(e.to_string()),
                 })
                 .ok();
@@ -434,8 +416,6 @@ fn spawn_delete(tx: Sender<AppEvent>, path: PathBuf, known_size: u64, dry_run: b
         }
     });
 }
-
-// ── Open directory ───────────────────────────────────────────────
 
 fn open_directory(app: &App) {
     let result = match app.get_selected_result() {
